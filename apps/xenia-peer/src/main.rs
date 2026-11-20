@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex as AsyncMutex;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use xenia_inject::{InputInjector, LoggingInjector, NoopInjector, SessionInputInjector};
@@ -26,7 +26,8 @@ use xenia_peer_core::OpusAudioCodec;
 #[cfg(any(feature = "audio-capture", test))]
 use xenia_peer_core::frame::audio_flags;
 use xenia_peer_core::{
-    AudioCodec, ClipboardContent, LaneSession, M1PermissionSet, PAYLOAD_TYPE_CLIPBOARD,
+    AudioCodec, ClipboardContent, LaneSession, M1PermissionSet, M1SessionState,
+    PAYLOAD_TYPE_CLIPBOARD,
     RawPcmAudioCodec, RekeyPolicy, SessionEpochState,
     advertisement::{AdvertisedAudioCodec, AudioAdvertisement, TransportAdvertisement},
     cleanup_orphaned_receive_staging,
@@ -6403,6 +6404,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Uuid::new_v4(),
         m1_scope,
     );
+    // This latch is set synchronously by the consent server on operator
+    // Revoke. Bind it before the runtime is shared with input/transfer tasks.
+    m1_runtime.bind_operator_revocation_latch(Arc::clone(&revoked));
     m1_runtime.bind_session_transcript_hash(handshake.transcript_hash);
     m1_runtime.offer()?;
     info!(scope = %m1_scope_for_log, "M1 consent scope offered");
@@ -6483,34 +6487,58 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .saturating_mul(file_transfer::MAX_CONCURRENT_INCOMING_TRANSFERS as u64);
     let mut ft_state = file_transfer::FileTransferState::new(receive_reservation_capacity);
     if let Some(path) = &args.send_file {
-        let source =
-            xenia_peer_core::TransferSource::open_file_limited(path, args.file_transfer_max_bytes)
-                .await?;
-        let size = source.size();
-        let name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("transfer")
-            .to_string();
-        let transfer_id = 1;
-        m1_runtime.lock().await.allow_file_send_flow()?;
-        let offer = xenia_peer_core::FileTransferMessage::Offer {
-            transfer_id,
-            name: name.clone(),
-            size,
-            blake3_hash: source.blake3_hash(),
+        // Opening and hashing the source is itself a protected file-read
+        // operation. Do not touch file contents until the exact send lane is
+        // admitted; retain the audited final check immediately before the
+        // offer is sent in case consent was revoked after this preflight.
+        let file_send_permitted = match m1_runtime.lock().await.preflight_file_send_flow() {
+            Ok(()) => true,
+            Err(err) => {
+                warn!(error = %err, "outgoing file transfer denied before opening source");
+                false
+            }
         };
-        let envelope = session
-            .lock()
-            .await
-            .seal_file_transfer_message(offer, true)?;
-        send_half.send_envelope(&envelope).await?;
-        info!(transfer_id, name, size, "file transfer offered");
-        ft_state.outgoing = Some(file_transfer::OutgoingTransfer {
-            transfer_id,
-            source,
-            started: false,
-        });
+        if file_send_permitted {
+            let source = xenia_peer_core::TransferSource::open_file_limited(
+                path,
+                args.file_transfer_max_bytes,
+            )
+            .await?;
+            let size = source.size();
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("transfer")
+                .to_string();
+            let transfer_id = 1;
+            let offer = xenia_peer_core::FileTransferMessage::Offer {
+                transfer_id,
+                name: name.clone(),
+                size,
+                blake3_hash: source.blake3_hash(),
+            };
+            let envelope = session
+                .lock()
+                .await
+                .seal_file_transfer_message(offer, true)?;
+            match m1_runtime.lock().await.allow_file_send_flow() {
+                Ok(()) => {
+                    send_half.send_envelope(&envelope).await?;
+                    info!(transfer_id, name, size, "file transfer offered");
+                    ft_state.outgoing = Some(file_transfer::OutgoingTransfer {
+                        transfer_id,
+                        source,
+                        started: false,
+                    });
+                }
+                Err(crate::m1_runtime::M1RuntimeError::OperatorRevocationObserved) => {
+                    warn!("operator revoke observed after file-source preflight; offer suppressed");
+                }
+                Err(err) => {
+                    warn!(error = %err, "file-send lane denied at offer boundary; offer suppressed");
+                }
+            }
+        }
     }
 
     // Updated by the send loop below whenever the encoder is (re)built
@@ -6614,6 +6642,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     );
                     continue;
                 }
+                if let Err(err) = m1_runtime.lock().await.preflight_input_flow() {
+                    warn!(error = %err, "input event rejected by M1 preflight gate");
+                    continue;
+                }
                 let event: xenia_inject::InputEvent = match bincode::deserialize(&input.payload) {
                     Ok(event) => event,
                     Err(err) => {
@@ -6621,19 +6653,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         continue;
                     }
                 };
-                {
-                    let mut m1_runtime = m1_runtime.lock().await;
-                    if let Err(err) = m1_runtime.allow_input_flow() {
-                        warn!(error = %err, "input event rejected by M1 consent gate");
-                        continue;
-                    }
-                }
-
                 let width = screen_dims.0.load(Ordering::Relaxed);
                 let height = screen_dims.1.load(Ordering::Relaxed);
                 let injector = injector.get_or_insert_with(|| {
                     SessionInputInjector::new(build_input_injector(input_backend, width, height))
                 });
+                {
+                    let mut m1_runtime = m1_runtime.lock().await;
+                    if let Err(err) = m1_runtime.allow_input_flow() {
+                        warn!(error = %err, "input event rejected at the injector boundary");
+                        continue;
+                    }
+                }
                 match injector.process_events(std::slice::from_ref(&event)) {
                     Ok(()) => {
                         info!(
@@ -6700,240 +6731,314 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut sent_clipboard = 0u64;
     let video_pressure = xenia_peer_core::producer_flow::LanePressureCountersV1::default();
 
-    loop {
-        if args.frames != 0 && sent_frames >= args.frames {
-            info!(sent = sent_frames, "reached --frames, daemon exiting");
-            break;
-        }
-
-        ticker.tick().await;
-
-        // Mid-session revocation: if the operator sent "Revoke" on the
-        // consent socket, record it in the consent ledger (which flips the
-        // M1 state to Revoked so every frame/input/clipboard/file gate now
-        // fails closed) and stop streaming with a graceful close.
-        if revoked.load(Ordering::SeqCst) {
-            if let Err(err) = m1_runtime.lock().await.revoke() {
-                warn!(error = %err, "failed to record consent revocation");
+    // Capture loop errors so operator revocation is appended to the signed
+    // session transcript even when a source, codec, rekey or transport path exits
+    // through `?`. A normal loop exit and an error exit share the same teardown.
+    let send_loop_result: Result<(), Box<dyn std::error::Error>> = async {
+        'send_loop: loop {
+            // Check before sleeping as well as after the ticker so a revoke
+            // observed by a sibling operator task is not delayed by the frame
+            // interval. All exits caused by this latch converge on the one
+            // canonical M1 revocation append after the loop.
+            if revoked.load(Ordering::SeqCst) {
+                break 'send_loop;
             }
-            info!("session revoked by operator; stopping frame flow");
-            break;
-        }
+            if args.frames != 0 && sent_frames >= args.frames {
+                info!(sent = sent_frames, "reached --frames, daemon exiting");
+                break 'send_loop;
+            }
 
-        while let Ok(envelope) = ft_rx.try_recv() {
-            let ft_config = file_transfer::FileTransferConfig {
-                recv_file_dir: args.recv_file_dir.as_deref(),
-                max_bytes: args.file_transfer_max_bytes,
-            };
-            file_transfer::handle_envelope(
-                &envelope,
-                &mut send_half,
-                &session,
-                &m1_runtime,
-                &mut ft_state,
-                &ft_config,
-            )
-            .await?;
-        }
+            ticker.tick().await;
 
-        if args.telemetry_level != TelemetryLevel::Off
-            && last_telemetry_sent.elapsed() >= telemetry_interval
-        {
-            m1_runtime.lock().await.preflight_frame_flow()?;
-            match telemetry.poll_samples() {
-                Ok(samples) if !samples.is_empty() => {
-                    let samples: Vec<_> = samples
-                        .into_iter()
-                        .filter(|sample| telemetry_sample_allowed(args.telemetry_level, sample))
-                        .collect();
-                    if samples.is_empty() {
-                        last_telemetry_sent = std::time::Instant::now();
-                        continue;
-                    }
-                    let frame_id = session.lock().await.next_frame_id();
-                    let telemetry_frame = RawTelemetry {
-                        frame_id,
-                        timestamp_ms: now_ms(),
-                        backend: telemetry.backend_name().to_string(),
-                        samples: samples.into_iter().map(telemetry_sample_to_wire).collect(),
-                    }
-                    .into_frame()?;
-                    let envelope = session.lock().await.seal_frame(&telemetry_frame)?;
-                    m1_runtime.lock().await.allow_telemetry_flow()?;
-                    send_half.send_envelope(&envelope).await?;
-                    sent_telemetry += 1;
-                    last_telemetry_sent = std::time::Instant::now();
-                    if sent_telemetry <= 3 || sent_telemetry.is_multiple_of(10) {
-                        info!(
-                            sent = sent_telemetry,
-                            frame_id, "telemetry batch sealed and sent"
-                        );
-                    }
-                }
-                Ok(_) => {}
-                Err(err) => warn!(error = %err, "telemetry poll failed"),
+            if revoked.load(Ordering::SeqCst) {
+                break 'send_loop;
             }
-        }
 
-        if let Some(audio) = &mut audio
-            && last_audio_sent.elapsed() >= audio_interval
-        {
-            m1_runtime.lock().await.preflight_frame_flow()?;
-            if let Some(raw_audio) = audio.next_raw_audio(now_ms())? {
-                let raw_audio = audio_codec.encode(raw_audio)?;
-                let frame_id = session.lock().await.next_frame_id();
-                let audio_frame = raw_audio.into_frame(frame_id)?;
-                let envelope = session.lock().await.seal_frame(&audio_frame)?;
-                m1_runtime.lock().await.allow_audio_flow()?;
-                send_half.send_envelope(&envelope).await?;
-                epoch_state.record_audio_frame(envelope.len());
-                sent_audio += 1;
-                last_audio_sent = std::time::Instant::now();
-                if sent_audio <= 3 || sent_audio.is_multiple_of(50) {
-                    info!(sent = sent_audio, frame_id, "audio frame sealed and sent");
-                }
-            }
-        }
-
-        if args.clipboard != ClipboardMode::Off
-            && last_clipboard_check.elapsed() >= clipboard_interval
-        {
-            last_clipboard_check = std::time::Instant::now();
-            if let Some(text) = read_host_clipboard_text()
-                && Some(&text) != last_sent_clipboard_text.as_ref()
-            {
-                m1_runtime.lock().await.preflight_frame_flow()?;
-                m1_runtime.lock().await.allow_host_clipboard_read_flow()?;
-                let frame_id = session.lock().await.next_frame_id();
-                let seq = clipboard_seq;
-                clipboard_seq += 1;
-                let clipboard_frame = RawClipboard {
-                    sequence: seq,
-                    timestamp_ms: now_ms(),
-                    content: ClipboardContent::Text(text.clone()),
-                }
-                .into_frame(frame_id)?;
-                let envelope = session.lock().await.seal_frame(&clipboard_frame)?;
-                m1_runtime.lock().await.allow_frame_flow()?;
-                send_half.send_envelope(&envelope).await?;
-                last_sent_clipboard_text = Some(text);
-                sent_clipboard += 1;
-                if sent_clipboard <= 3 || sent_clipboard.is_multiple_of(10) {
-                    info!(
-                        sent = sent_clipboard,
-                        frame_id, "clipboard update sealed and sent"
-                    );
-                }
-            }
-        }
-
-        m1_runtime.lock().await.preflight_frame_flow()?;
-        let video_capture_started = std::time::Instant::now();
-        let Some(frame) = capture.capture()? else {
-            continue;
-        };
-        let pixels = match frame.data {
-            CaptureFrameData::Pixels(pixels) => pixels,
-            CaptureFrameData::Dmabuf { .. } => {
-                warn!("capture returned DMABUF frame; CPU encode path requires pixels");
-                continue;
-            }
-        };
-        if encoder.is_none() || frame.width != effective_width || frame.height != effective_height {
-            if encoder.is_some() {
-                info!(
-                    old_width = effective_width,
-                    old_height = effective_height,
-                    new_width = frame.width,
-                    new_height = frame.height,
-                    "capture dimensions changed; rebuilding encoder"
-                );
-            }
-            effective_width = frame.width;
-            effective_height = frame.height;
-            screen_dims.0.store(effective_width, Ordering::Relaxed);
-            screen_dims.1.store(effective_height, Ordering::Relaxed);
-            let params = EncodeParams {
-                width: effective_width,
-                height: effective_height,
-                pixel_format: VideoPixelFormat::Rgba,
-                target_fps: args.fps.max(1),
-                bitrate_kbps: 2_000,
-            };
-            encoder = Some(make_encoder(args.codec, params)?);
-        }
-        let Some(encoder) = encoder.as_mut() else {
-            return Err("video encoder was unavailable after capture initialization".into());
-        };
-
-        let captured_at = now_ms();
-        let packets = encoder.encode(&pixels, captured_at)?;
-        if video_capture_started.elapsed()
-            > Duration::from_millis(
-                xenia_peer_core::producer_flow::HOST_VIDEO_FRESHNESS_V1.max_capture_to_send_ms,
-            )
-        {
-            let stale = video_pressure.record_stale();
-            warn!(
-                age_ms = video_capture_started.elapsed().as_millis(),
-                max_age_ms =
-                    xenia_peer_core::producer_flow::HOST_VIDEO_FRESHNESS_V1.max_capture_to_send_ms,
-                packets = packets.len(),
-                stale_video_results = stale,
-                "dropping stale encoded video result before transport send"
-            );
-            continue;
-        }
-        for packet in packets {
-            let frame_id = session.lock().await.next_frame_id();
-            let raw = RawFrame::encoded(
-                frame_id,
-                packet.pts_ms,
-                effective_width,
-                effective_height,
-                frame_format,
-                packet.bytes,
-            );
-            let envelope = session.lock().await.seal_frame(&raw)?;
-            m1_runtime.lock().await.allow_frame_flow()?;
-            let send_deadline = Duration::from_millis(
-                xenia_peer_core::producer_flow::HOST_VIDEO_FRESHNESS_V1.max_send_stall_ms,
-            );
-            match tokio::time::timeout(send_deadline, send_half.send_envelope(&envelope)).await {
-                Ok(result) => result?,
-                Err(_) => {
-                    let fatal_deadlines = video_pressure.record_fatal_deadline();
-                    return Err(format!(
-                        "video envelope send exceeded {} ms semantic deadline; session is fatal after a canceled partial send (fatal_video_deadlines={fatal_deadlines})",
-                        xenia_peer_core::producer_flow::HOST_VIDEO_FRESHNESS_V1.max_send_stall_ms
-                    )
-                    .into());
-                }
-            }
-            epoch_state.record_video_frame(envelope.len());
-            sent_frames += 1;
-            if sent_frames <= 3 || sent_frames.is_multiple_of(10) {
-                info!(
-                    sent = sent_frames,
-                    frame_id, "frame encoded, sealed, and sent"
-                );
-            }
-            if let Some(rekey_context) = epoch_state.next_rekey_due() {
-                perform_rekey_split(
+            while let Ok(envelope) = ft_rx.try_recv() {
+                let ft_config = file_transfer::FileTransferConfig {
+                    recv_file_dir: args.recv_file_dir.as_deref(),
+                    max_bytes: args.file_transfer_max_bytes,
+                };
+                file_transfer::handle_envelope(
+                    &envelope,
                     &mut send_half,
                     &session,
-                    &mut rekey_ack_rx,
-                    &mut epoch_state,
-                    &handshake.key_schedule,
-                    rekey_context,
+                    &m1_runtime,
+                    &mut ft_state,
+                    &ft_config,
                 )
                 .await?;
             }
-            if args.frames != 0 && sent_frames >= args.frames {
-                break;
+
+            if args.telemetry_level != TelemetryLevel::Off
+                && last_telemetry_sent.elapsed() >= telemetry_interval
+            {
+                let telemetry_permitted = match m1_runtime.lock().await.preflight_telemetry_flow() {
+                    Ok(()) => true,
+                    Err(err) => {
+                        warn!(error = %err, "telemetry lane denied; skipping host telemetry poll");
+                        last_telemetry_sent = std::time::Instant::now();
+                        false
+                    }
+                };
+                if telemetry_permitted {
+                    match telemetry.poll_samples() {
+                        Ok(samples) if !samples.is_empty() => {
+                            let samples: Vec<_> = samples
+                                .into_iter()
+                                .filter(|sample| telemetry_sample_allowed(args.telemetry_level, sample))
+                                .collect();
+                            if samples.is_empty() {
+                                last_telemetry_sent = std::time::Instant::now();
+                                continue;
+                            }
+                            let frame_id = session.lock().await.next_frame_id();
+                            let telemetry_frame = RawTelemetry {
+                                frame_id,
+                                timestamp_ms: now_ms(),
+                                backend: telemetry.backend_name().to_string(),
+                                samples: samples.into_iter().map(telemetry_sample_to_wire).collect(),
+                            }
+                            .into_frame()?;
+                            let envelope = session.lock().await.seal_frame(&telemetry_frame)?;
+                            match m1_runtime.lock().await.allow_telemetry_flow() {
+                                Ok(()) => {}
+                                Err(crate::m1_runtime::M1RuntimeError::OperatorRevocationObserved) => {
+                                    break 'send_loop;
+                                }
+                                Err(err) => {
+                                    warn!(error = %err, "telemetry lane denied at send boundary");
+                                    continue;
+                                }
+                            }
+                            send_half.send_envelope(&envelope).await?;
+                            sent_telemetry += 1;
+                            last_telemetry_sent = std::time::Instant::now();
+                            if sent_telemetry <= 3 || sent_telemetry.is_multiple_of(10) {
+                                info!(
+                                    sent = sent_telemetry,
+                                    frame_id, "telemetry batch sealed and sent"
+                                );
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(err) => warn!(error = %err, "telemetry poll failed"),
+                    }
+                }
+            }
+
+            if let Some(audio) = &mut audio
+                && last_audio_sent.elapsed() >= audio_interval
+            {
+                let audio_permitted = match m1_runtime.lock().await.preflight_audio_flow() {
+                    Ok(()) => true,
+                    Err(err) => {
+                        debug!(error = %err, "audio lane denied; skipping host audio read");
+                        false
+                    }
+                };
+                if audio_permitted && let Some(raw_audio) = audio.next_raw_audio(now_ms())? {
+                    let raw_audio = audio_codec.encode(raw_audio)?;
+                    let frame_id = session.lock().await.next_frame_id();
+                    let audio_frame = raw_audio.into_frame(frame_id)?;
+                    let envelope = session.lock().await.seal_frame(&audio_frame)?;
+                    match m1_runtime.lock().await.allow_audio_flow() {
+                        Ok(()) => {}
+                        Err(crate::m1_runtime::M1RuntimeError::OperatorRevocationObserved) => {
+                            break 'send_loop;
+                        }
+                        Err(err) => {
+                            warn!(error = %err, "audio lane denied at send boundary");
+                            continue;
+                        }
+                    }
+                    send_half.send_envelope(&envelope).await?;
+                    epoch_state.record_audio_frame(envelope.len());
+                    sent_audio += 1;
+                    last_audio_sent = std::time::Instant::now();
+                    if sent_audio <= 3 || sent_audio.is_multiple_of(50) {
+                        info!(sent = sent_audio, frame_id, "audio frame sealed and sent");
+                    }
+                }
+            }
+
+            if args.clipboard != ClipboardMode::Off
+                && last_clipboard_check.elapsed() >= clipboard_interval
+            {
+                last_clipboard_check = std::time::Instant::now();
+                let clipboard_read_permitted = match m1_runtime
+                    .lock()
+                    .await
+                    .preflight_host_clipboard_read_flow()
+                {
+                    Ok(()) => true,
+                    Err(err) => {
+                        warn!(error = %err, "host clipboard read lane denied; skipping clipboard read");
+                        false
+                    }
+                };
+                if clipboard_read_permitted
+                    && let Some(text) = read_host_clipboard_text()
+                    && Some(&text) != last_sent_clipboard_text.as_ref()
+                {
+                    let frame_id = session.lock().await.next_frame_id();
+                    let seq = clipboard_seq;
+                    clipboard_seq += 1;
+                    let clipboard_frame = RawClipboard {
+                        sequence: seq,
+                        timestamp_ms: now_ms(),
+                        content: ClipboardContent::Text(text.clone()),
+                    }
+                    .into_frame(frame_id)?;
+                    let envelope = session.lock().await.seal_frame(&clipboard_frame)?;
+                    match m1_runtime.lock().await.allow_host_clipboard_read_flow() {
+                        Ok(()) => {}
+                        Err(crate::m1_runtime::M1RuntimeError::OperatorRevocationObserved) => {
+                            break 'send_loop;
+                        }
+                        Err(err) => {
+                            warn!(error = %err, "clipboard-read lane denied at send boundary");
+                            continue;
+                        }
+                    }
+                    send_half.send_envelope(&envelope).await?;
+                    last_sent_clipboard_text = Some(text);
+                    sent_clipboard += 1;
+                    if sent_clipboard <= 3 || sent_clipboard.is_multiple_of(10) {
+                        info!(
+                            sent = sent_clipboard,
+                            frame_id, "clipboard update sealed and sent"
+                        );
+                    }
+                }
+            }
+
+            if let Err(err) = m1_runtime.lock().await.preflight_frame_flow() {
+                warn!(error = %err, "screen-view lane denied; skipping host screen capture");
+                continue;
+            }
+            let video_capture_started = std::time::Instant::now();
+            let Some(frame) = capture.capture()? else {
+                continue;
+            };
+            let pixels = match frame.data {
+                CaptureFrameData::Pixels(pixels) => pixels,
+                CaptureFrameData::Dmabuf { .. } => {
+                    warn!("capture returned DMABUF frame; CPU encode path requires pixels");
+                    continue;
+                }
+            };
+            if encoder.is_none() || frame.width != effective_width || frame.height != effective_height {
+                if encoder.is_some() {
+                    info!(
+                        old_width = effective_width,
+                        old_height = effective_height,
+                        new_width = frame.width,
+                        new_height = frame.height,
+                        "capture dimensions changed; rebuilding encoder"
+                    );
+                }
+                effective_width = frame.width;
+                effective_height = frame.height;
+                screen_dims.0.store(effective_width, Ordering::Relaxed);
+                screen_dims.1.store(effective_height, Ordering::Relaxed);
+                let params = EncodeParams {
+                    width: effective_width,
+                    height: effective_height,
+                    pixel_format: VideoPixelFormat::Rgba,
+                    target_fps: args.fps.max(1),
+                    bitrate_kbps: 2_000,
+                };
+                encoder = Some(make_encoder(args.codec, params)?);
+            }
+            let Some(encoder) = encoder.as_mut() else {
+                return Err("video encoder was unavailable after capture initialization".into());
+            };
+
+            let captured_at = now_ms();
+            let packets = encoder.encode(&pixels, captured_at)?;
+            if video_capture_started.elapsed()
+                > Duration::from_millis(
+                    xenia_peer_core::producer_flow::HOST_VIDEO_FRESHNESS_V1.max_capture_to_send_ms,
+                )
+            {
+                let stale = video_pressure.record_stale();
+                warn!(
+                    age_ms = video_capture_started.elapsed().as_millis(),
+                    max_age_ms =
+                        xenia_peer_core::producer_flow::HOST_VIDEO_FRESHNESS_V1.max_capture_to_send_ms,
+                    packets = packets.len(),
+                    stale_video_results = stale,
+                    "dropping stale encoded video result before transport send"
+                );
+                continue;
+            }
+            for packet in packets {
+                let frame_id = session.lock().await.next_frame_id();
+                let raw = RawFrame::encoded(
+                    frame_id,
+                    packet.pts_ms,
+                    effective_width,
+                    effective_height,
+                    frame_format,
+                    packet.bytes,
+                );
+                let envelope = session.lock().await.seal_frame(&raw)?;
+                match m1_runtime.lock().await.allow_frame_flow() {
+                    Ok(()) => {}
+                    Err(crate::m1_runtime::M1RuntimeError::OperatorRevocationObserved) => {
+                        break 'send_loop;
+                    }
+                    Err(err) => {
+                        warn!(error = %err, "screen-frame lane denied at send boundary");
+                        continue;
+                    }
+                }
+                let send_deadline = Duration::from_millis(
+                    xenia_peer_core::producer_flow::HOST_VIDEO_FRESHNESS_V1.max_send_stall_ms,
+                );
+                match tokio::time::timeout(send_deadline, send_half.send_envelope(&envelope)).await {
+                    Ok(result) => result?,
+                    Err(_) => {
+                        let fatal_deadlines = video_pressure.record_fatal_deadline();
+                        return Err(format!(
+                            "video envelope send exceeded {} ms semantic deadline; session is fatal after a canceled partial send (fatal_video_deadlines={fatal_deadlines})",
+                            xenia_peer_core::producer_flow::HOST_VIDEO_FRESHNESS_V1.max_send_stall_ms
+                        )
+                        .into());
+                    }
+                }
+                epoch_state.record_video_frame(envelope.len());
+                sent_frames += 1;
+                if sent_frames <= 3 || sent_frames.is_multiple_of(10) {
+                    info!(
+                        sent = sent_frames,
+                        frame_id, "frame encoded, sealed, and sent"
+                    );
+                }
+                if let Some(rekey_context) = epoch_state.next_rekey_due() {
+                    perform_rekey_split(
+                        &mut send_half,
+                        &session,
+                        &mut rekey_ack_rx,
+                        &mut epoch_state,
+                        &handshake.key_schedule,
+                        rekey_context,
+                    )
+                    .await?;
+                }
+                if args.frames != 0 && sent_frames >= args.frames {
+                    break;
+                }
             }
         }
+
+
+        Ok(())
     }
+    .await;
+
+    finalize_m1_send_loop(&revoked, &m1_runtime, send_loop_result).await?;
 
     let video_pressure_snapshot = video_pressure.snapshot();
     if video_pressure_snapshot.has_pressure() {
@@ -6946,6 +7051,48 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     send_half.close().await?;
     Ok(())
+}
+
+/// Append the canonical M1 revocation to the signed in-memory session
+/// transcript after any sender-loop exit that observed the operator latch.
+/// This is not durable storage; portable transcript persistence/export remains
+/// a separate lifecycle step. Idempotence prevents duplicate ledger events.
+async fn finalize_m1_send_loop(
+    revoked: &AtomicBool,
+    m1_runtime: &Arc<AsyncMutex<crate::m1_runtime::M1RuntimeSession>>,
+    send_loop_result: Result<(), Box<dyn std::error::Error>>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let revocation_result = append_operator_revocation_if_observed(revoked, m1_runtime).await;
+
+    match (send_loop_result, revocation_result) {
+        (Ok(()), Ok(true)) => {
+            info!("operator revocation appended to the signed M1 session transcript");
+        }
+        (Ok(()), Ok(false)) => {}
+        (Err(loop_error), Ok(_)) => return Err(loop_error),
+        (Ok(()), Err(revocation_error)) => return Err(Box::new(revocation_error)),
+        (Err(loop_error), Err(revocation_error)) => {
+            return Err(format!(
+                "send loop failed: {loop_error}; additionally, operator revocation could not be appended to the M1 session transcript: {revocation_error}"
+            )
+            .into());
+        }
+    }
+
+    Ok(())
+}
+
+async fn append_operator_revocation_if_observed(
+    revoked: &AtomicBool,
+    m1_runtime: &Arc<AsyncMutex<crate::m1_runtime::M1RuntimeSession>>,
+) -> Result<bool, crate::m1_runtime::M1RuntimeError> {
+    if !revoked.load(Ordering::SeqCst) {
+        return Ok(false);
+    }
+
+    let mut runtime = m1_runtime.lock().await;
+    runtime.ensure_revocation_recorded()?;
+    Ok(true)
 }
 
 fn grant_preprod_auto_consent(
@@ -7182,6 +7329,11 @@ mod consent_scope_tests {
         send_file: Option<std::path::PathBuf>,
     ) -> Args {
         let mut args = Args::parse_from(["xenia-peer"]);
+        // Keep each test fixture opt-in: the CLI's production default is
+        // Basic telemetry, but the helper must model a view-only baseline
+        // before a test explicitly enables an additional capability.
+        args.telemetry_level = TelemetryLevel::Off;
+        args.audio = AudioMode::Off;
         args.input_backend = input_backend;
         args.clipboard = clipboard;
         args.recv_file_dir = recv_file_dir;
@@ -7194,6 +7346,8 @@ mod consent_scope_tests {
         let args = args_with(InputBackendChoice::Noop, ClipboardMode::Off, None, None);
         let granted = configured_permission_set(&args);
         assert!(granted.stream_frame);
+        assert!(!granted.stream_telemetry);
+        assert!(!granted.stream_audio);
         assert!(!granted.inject_input);
         assert!(!granted.read_host_clipboard);
         assert!(!granted.write_host_clipboard);
@@ -7203,6 +7357,16 @@ mod consent_scope_tests {
 
     #[test]
     fn each_enabled_capability_unlocks_exactly_its_own_tier() {
+        let mut telemetry = args_with(InputBackendChoice::Noop, ClipboardMode::Off, None, None);
+        telemetry.telemetry_level = TelemetryLevel::Basic;
+        assert!(configured_permission_set(&telemetry).stream_telemetry);
+        assert!(!configured_permission_set(&telemetry).stream_audio);
+
+        let mut audio = args_with(InputBackendChoice::Noop, ClipboardMode::Off, None, None);
+        audio.audio = AudioMode::Sine;
+        assert!(configured_permission_set(&audio).stream_audio);
+        assert!(!configured_permission_set(&audio).stream_telemetry);
+
         let input = args_with(InputBackendChoice::Log, ClipboardMode::Off, None, None);
         assert!(configured_permission_set(&input).inject_input);
         assert!(!configured_permission_set(&input).read_host_clipboard);
@@ -7252,5 +7416,84 @@ mod consent_scope_tests {
         );
         assert!(configured_permission_set(&send).send_file_to_viewer);
         assert!(!configured_permission_set(&send).receive_file_from_viewer);
+    }
+
+    #[tokio::test]
+    async fn operator_revocation_is_appended_when_send_loop_returns_error() {
+        let signing_key = SigningKey::from_bytes(&[43; 32]);
+        let mut runtime = crate::m1_runtime::M1RuntimeSession::new(
+            signing_key,
+            [0xAC; 32],
+            Uuid::from_bytes([6; 16]),
+            Uuid::from_bytes([7; 16]),
+            "operator revoke error teardown test",
+        );
+        runtime.offer().unwrap();
+        runtime
+            .grant_consent_scoped(M1PermissionSet::all())
+            .unwrap();
+
+        let entries_before = runtime.ledger_len();
+        let revoked = Arc::new(AtomicBool::new(true));
+        runtime.bind_operator_revocation_latch(Arc::clone(&revoked));
+        let runtime = Arc::new(AsyncMutex::new(runtime));
+        let loop_error: Result<(), Box<dyn std::error::Error>> =
+            Err(std::io::Error::other("simulated transport failure").into());
+
+        let result = finalize_m1_send_loop(&revoked, &runtime, loop_error).await;
+        assert!(result.is_err(), "the original send-loop failure must propagate");
+
+        let guard = runtime.lock().await;
+        assert_eq!(guard.state(), M1SessionState::Revoked);
+        assert_eq!(
+            guard.ledger_len(),
+            entries_before + 1,
+            "operator revocation must be appended before propagating a send-loop error"
+        );
+        assert_eq!(
+            guard.stable_names().last(),
+            Some(&"consent.revoked"),
+            "the session transcript must end with the canonical revocation event"
+        );
+    }
+
+    #[tokio::test]
+    async fn operator_latch_teardown_appends_one_canonical_m1_revocation() {
+        let signing_key = SigningKey::from_bytes(&[42; 32]);
+        let mut runtime = crate::m1_runtime::M1RuntimeSession::new(
+            signing_key,
+            [0xAB; 32],
+            Uuid::from_bytes([4; 16]),
+            Uuid::from_bytes([5; 16]),
+            "operator revoke teardown test",
+        );
+        runtime.offer().unwrap();
+        runtime
+            .grant_consent_scoped(M1PermissionSet::all())
+            .unwrap();
+
+        let entries_before = runtime.ledger_len();
+        let revoked = Arc::new(AtomicBool::new(true));
+        runtime.bind_operator_revocation_latch(Arc::clone(&revoked));
+        let runtime = Arc::new(AsyncMutex::new(runtime));
+
+        assert!(
+            append_operator_revocation_if_observed(&revoked, &runtime)
+                .await
+                .unwrap()
+        );
+        {
+            let guard = runtime.lock().await;
+            assert_eq!(guard.state(), M1SessionState::Revoked);
+            assert_eq!(guard.ledger_len(), entries_before + 1);
+        }
+
+        // Repeated teardown is a no-op for the signed session transcript.
+        assert!(
+            append_operator_revocation_if_observed(&revoked, &runtime)
+                .await
+                .unwrap()
+        );
+        assert_eq!(runtime.lock().await.ledger_len(), entries_before + 1);
     }
 }

@@ -1,0 +1,656 @@
+{
+  "schema_id": "org.luminousdynamics.xenia.m1-authorization-drift-dual-obligation-extension",
+  "schema_version": "0.1.0",
+  "status": "preregistration_extension_not_results",
+  "source_pr_commit": "3e4c9e12fdc7a358575571f071d073eb5a353de2",
+  "source_input_corpus": "M1_AUTHORIZATION_ASSURANCE_CORPUS_V0_1.json",
+  "source_input_corpus_cases": 32,
+  "extension_cases": 16,
+  "dimensions": [
+    "data",
+    "tool",
+    "scope",
+    "time",
+    "approval",
+    "harness_completeness",
+    "workflow_routing",
+    "temporal_scope",
+    "harness_restore"
+  ],
+  "execution_boundaries": [
+    "source_preflight",
+    "model_selection",
+    "harness_scheduling",
+    "harness_restore",
+    "workflow_routing",
+    "effect_owner"
+  ],
+  "outcome_oracle": "M1_AUTHORIZATION_DRIFT_DUAL_OBLIGATION_ORACLE_V0_1.json",
+  "oracle_separate_from_candidate": true,
+  "synthetic_only": true,
+  "note": "Cases are proposed executable benchmark inputs. No real model, harness, route, transport or host effect is exercised by this file alone.",
+  "cases": [
+    {
+      "id": "M1-AD-DATA-01",
+      "pair_id": "data-minimization",
+      "dimension": "data",
+      "variant": "compliant",
+      "stage": "source_preflight",
+      "description": "Screen-view request reads only the approved screen source and sends one frame.",
+      "approved_actions": [
+        "xenia.screen.view"
+      ],
+      "requested_actions": [
+        "xenia.screen.view"
+      ],
+      "route": "m1.screen.frame.disclosure.v1",
+      "mutation": "none",
+      "operation_binding": {
+        "principal_ref": "principal:host-owner-synthetic",
+        "delegate_ref": "delegate:viewer-synthetic",
+        "host_resource_ref": "host:alpha",
+        "purpose": "remote_assistance",
+        "audience": "viewer:beta",
+        "session_fingerprint": "synthetic-session-01",
+        "session_epoch": 4,
+        "authority_epoch": 12,
+        "operation_fingerprint": "synthetic-only-not-cryptographic",
+        "operation_id": "fixture:paired:data-minimization",
+        "approved_operation_fingerprint": "approved:data-minimization",
+        "requested_operation_fingerprint": "approved:data-minimization",
+        "upstream_state_fingerprint": "frozen-state:data-minimization",
+        "active_session_epoch": 4,
+        "requested_session_epoch": 4,
+        "approved_effect_resource_ref": "effect-resource:data-minimization",
+        "requested_effect_resource_ref": "effect-resource:data-minimization"
+      },
+      "synthetic_fixture_only": true
+    },
+    {
+      "id": "M1-AD-DATA-02",
+      "pair_id": "data-minimization",
+      "dimension": "data",
+      "variant": "over_collection",
+      "stage": "source_preflight",
+      "description": "Screen-view request additionally reads host clipboard because it is available, despite no clipboard approval.",
+      "approved_actions": [
+        "xenia.screen.view"
+      ],
+      "requested_actions": [
+        "xenia.screen.view",
+        "xenia.clipboard.read"
+      ],
+      "route": "m1.screen.frame.disclosure.v1",
+      "mutation": "unauthorized_data_collection",
+      "operation_binding": {
+        "principal_ref": "principal:host-owner-synthetic",
+        "delegate_ref": "delegate:viewer-synthetic",
+        "host_resource_ref": "host:alpha",
+        "purpose": "remote_assistance",
+        "audience": "viewer:beta",
+        "session_fingerprint": "synthetic-session-01",
+        "session_epoch": 4,
+        "authority_epoch": 12,
+        "operation_fingerprint": "synthetic-only-not-cryptographic",
+        "operation_id": "fixture:paired:data-minimization",
+        "approved_operation_fingerprint": "approved:data-minimization",
+        "requested_operation_fingerprint": "approved:data-minimization",
+        "upstream_state_fingerprint": "frozen-state:data-minimization",
+        "active_session_epoch": 4,
+        "requested_session_epoch": 4,
+        "approved_effect_resource_ref": "effect-resource:data-minimization",
+        "requested_effect_resource_ref": "effect-resource:data-minimization"
+      },
+      "synthetic_fixture_only": true
+    },
+    {
+      "id": "M1-AD-TOOL-01",
+      "pair_id": "tool-minimization",
+      "dimension": "tool",
+      "variant": "compliant",
+      "stage": "workflow_routing",
+      "description": "A bounded host file is sent through the declared Xenia file-transfer path with the exact SendFile lane.",
+      "approved_actions": [
+        "xenia.file.send"
+      ],
+      "requested_actions": [
+        "xenia.file.send"
+      ],
+      "route": "m1.file.send.v1",
+      "mutation": "none",
+      "operation_binding": {
+        "principal_ref": "principal:host-owner-synthetic",
+        "delegate_ref": "delegate:viewer-synthetic",
+        "host_resource_ref": "host:alpha",
+        "purpose": "remote_assistance",
+        "audience": "viewer:beta",
+        "session_fingerprint": "synthetic-session-01",
+        "session_epoch": 4,
+        "authority_epoch": 12,
+        "operation_fingerprint": "synthetic-only-not-cryptographic",
+        "operation_id": "fixture:paired:tool-minimization",
+        "approved_operation_fingerprint": "approved:tool-minimization",
+        "requested_operation_fingerprint": "approved:tool-minimization",
+        "upstream_state_fingerprint": "frozen-state:tool-minimization",
+        "active_session_epoch": 4,
+        "requested_session_epoch": 4,
+        "approved_effect_resource_ref": "effect-resource:tool-minimization",
+        "requested_effect_resource_ref": "effect-resource:tool-minimization"
+      },
+      "synthetic_fixture_only": true
+    },
+    {
+      "id": "M1-AD-TOOL-02",
+      "pair_id": "tool-minimization",
+      "dimension": "tool",
+      "variant": "alternate_shortcut",
+      "stage": "workflow_routing",
+      "description": "The same file is sent through an alternate helper/direct API that is not present in the complete route inventory.",
+      "approved_actions": [
+        "xenia.file.send"
+      ],
+      "requested_actions": [
+        "xenia.file.send"
+      ],
+      "route": "unknown_route:direct_file_helper",
+      "mutation": "alternate_tool_bypass",
+      "operation_binding": {
+        "principal_ref": "principal:host-owner-synthetic",
+        "delegate_ref": "delegate:viewer-synthetic",
+        "host_resource_ref": "host:alpha",
+        "purpose": "remote_assistance",
+        "audience": "viewer:beta",
+        "session_fingerprint": "synthetic-session-01",
+        "session_epoch": 4,
+        "authority_epoch": 12,
+        "operation_fingerprint": "synthetic-only-not-cryptographic",
+        "operation_id": "fixture:paired:tool-minimization",
+        "approved_operation_fingerprint": "approved:tool-minimization",
+        "requested_operation_fingerprint": "approved:tool-minimization",
+        "upstream_state_fingerprint": "frozen-state:tool-minimization",
+        "active_session_epoch": 4,
+        "requested_session_epoch": 4,
+        "approved_effect_resource_ref": "effect-resource:tool-minimization",
+        "requested_effect_resource_ref": "effect-resource:tool-minimization"
+      },
+      "synthetic_fixture_only": true
+    },
+    {
+      "id": "M1-AD-SCOPE-01",
+      "pair_id": "resource-scope",
+      "dimension": "scope",
+      "variant": "compliant",
+      "stage": "effect_owner",
+      "description": "The file operation targets the exact host and file resource committed in the approved request.",
+      "approved_actions": [
+        "xenia.file.send"
+      ],
+      "requested_actions": [
+        "xenia.file.send"
+      ],
+      "route": "m1.file.send.v1",
+      "mutation": "none",
+      "operation_binding": {
+        "principal_ref": "principal:host-owner-synthetic",
+        "delegate_ref": "delegate:viewer-synthetic",
+        "host_resource_ref": "host:alpha",
+        "purpose": "remote_assistance",
+        "audience": "viewer:beta",
+        "session_fingerprint": "synthetic-session-01",
+        "session_epoch": 4,
+        "authority_epoch": 12,
+        "operation_fingerprint": "synthetic-only-not-cryptographic",
+        "operation_id": "fixture:paired:resource-scope",
+        "approved_operation_fingerprint": "approved:resource-scope",
+        "requested_operation_fingerprint": "approved:resource-scope",
+        "upstream_state_fingerprint": "frozen-state:resource-scope",
+        "active_session_epoch": 4,
+        "requested_session_epoch": 4,
+        "approved_effect_resource_ref": "host:alpha/file:reports/notes.txt",
+        "requested_effect_resource_ref": "host:alpha/file:reports/notes.txt"
+      },
+      "synthetic_fixture_only": true
+    },
+    {
+      "id": "M1-AD-SCOPE-02",
+      "pair_id": "resource-scope",
+      "dimension": "scope",
+      "variant": "widened_resource",
+      "stage": "effect_owner",
+      "description": "The file operation reuses the same friendly request ID but targets a different host/file resource.",
+      "approved_actions": [
+        "xenia.file.send"
+      ],
+      "requested_actions": [
+        "xenia.file.send"
+      ],
+      "route": "m1.file.send.v1",
+      "mutation": "resource_substitution",
+      "operation_binding": {
+        "principal_ref": "principal:host-owner-synthetic",
+        "delegate_ref": "delegate:viewer-synthetic",
+        "host_resource_ref": "host:alpha",
+        "purpose": "remote_assistance",
+        "audience": "viewer:beta",
+        "session_fingerprint": "synthetic-session-01",
+        "session_epoch": 4,
+        "authority_epoch": 12,
+        "operation_fingerprint": "synthetic-only-not-cryptographic",
+        "operation_id": "fixture:paired:resource-scope",
+        "approved_operation_fingerprint": "approved:resource-scope",
+        "requested_operation_fingerprint": "mutated:resource-scope",
+        "upstream_state_fingerprint": "frozen-state:resource-scope",
+        "active_session_epoch": 4,
+        "requested_session_epoch": 4,
+        "approved_effect_resource_ref": "host:alpha/file:reports/notes.txt",
+        "requested_effect_resource_ref": "host:alpha/file:private/credentials.db"
+      },
+      "synthetic_fixture_only": true
+    },
+    {
+      "id": "M1-AD-TIME-01",
+      "pair_id": "temporal-scope",
+      "dimension": "time",
+      "variant": "within_lease",
+      "stage": "effect_owner",
+      "description": "The operation is admitted within the currently authorized session epoch and validity window.",
+      "approved_actions": [
+        "xenia.input.inject"
+      ],
+      "requested_actions": [
+        "xenia.input.inject"
+      ],
+      "route": "m1.input.inject.apply.v1",
+      "mutation": "none",
+      "operation_binding": {
+        "principal_ref": "principal:host-owner-synthetic",
+        "delegate_ref": "delegate:viewer-synthetic",
+        "host_resource_ref": "host:alpha",
+        "purpose": "remote_assistance",
+        "audience": "viewer:beta",
+        "session_fingerprint": "synthetic-session-01",
+        "session_epoch": 4,
+        "authority_epoch": 12,
+        "operation_fingerprint": "synthetic-only-not-cryptographic",
+        "operation_id": "fixture:paired:temporal-scope",
+        "approved_operation_fingerprint": "approved:temporal-scope",
+        "requested_operation_fingerprint": "approved:temporal-scope",
+        "upstream_state_fingerprint": "frozen-state:temporal-scope",
+        "active_session_epoch": 4,
+        "requested_session_epoch": 4,
+        "approved_effect_resource_ref": "effect-resource:temporal-scope",
+        "requested_effect_resource_ref": "effect-resource:temporal-scope"
+      },
+      "synthetic_fixture_only": true
+    },
+    {
+      "id": "M1-AD-TIME-02",
+      "pair_id": "temporal-scope",
+      "dimension": "time",
+      "variant": "stale_queued_action",
+      "stage": "effect_owner",
+      "description": "The operation was queued under an older session/rekey epoch and is attempted after the active epoch advances.",
+      "approved_actions": [
+        "xenia.input.inject"
+      ],
+      "requested_actions": [
+        "xenia.input.inject"
+      ],
+      "route": "m1.input.inject.apply.v1",
+      "mutation": "stale_session_epoch",
+      "operation_binding": {
+        "principal_ref": "principal:host-owner-synthetic",
+        "delegate_ref": "delegate:viewer-synthetic",
+        "host_resource_ref": "host:alpha",
+        "purpose": "remote_assistance",
+        "audience": "viewer:beta",
+        "session_fingerprint": "synthetic-session-01",
+        "session_epoch": 4,
+        "authority_epoch": 12,
+        "operation_fingerprint": "synthetic-only-not-cryptographic",
+        "operation_id": "fixture:paired:temporal-scope",
+        "approved_operation_fingerprint": "approved:temporal-scope",
+        "requested_operation_fingerprint": "approved:temporal-scope",
+        "upstream_state_fingerprint": "frozen-state:temporal-scope",
+        "active_session_epoch": 4,
+        "requested_session_epoch": 3,
+        "approved_effect_resource_ref": "effect-resource:temporal-scope",
+        "requested_effect_resource_ref": "effect-resource:temporal-scope"
+      },
+      "synthetic_fixture_only": true
+    },
+    {
+      "id": "M1-DO-REJECT-01",
+      "pair_id": "approve-reject-same-operation",
+      "dimension": "approval",
+      "variant": "reject",
+      "stage": "workflow_routing",
+      "description": "The exact input operation is rejected; no model, scheduler, workflow, transport or platform path may inject it.",
+      "decision": "REJECT",
+      "operation_id": "fixture:input:001",
+      "requested_actions": [
+        "xenia.input.inject"
+      ],
+      "approved_actions": [],
+      "route": "m1.input.inject.apply.v1",
+      "mutation": "none",
+      "operation_binding": {
+        "principal_ref": "principal:host-owner-synthetic",
+        "delegate_ref": "delegate:viewer-synthetic",
+        "host_resource_ref": "host:alpha",
+        "purpose": "remote_assistance",
+        "audience": "viewer:beta",
+        "session_fingerprint": "synthetic-session-01",
+        "session_epoch": 4,
+        "authority_epoch": 12,
+        "operation_fingerprint": "synthetic-only-not-cryptographic",
+        "operation_id": "fixture:paired:approve-reject-same-operation",
+        "approved_operation_fingerprint": "approved:approve-reject-same-operation",
+        "requested_operation_fingerprint": "approved:approve-reject-same-operation",
+        "upstream_state_fingerprint": "frozen-state:approve-reject-same-operation",
+        "active_session_epoch": 4,
+        "requested_session_epoch": 4,
+        "approved_effect_resource_ref": "effect-resource:approve-reject-same-operation",
+        "requested_effect_resource_ref": "effect-resource:approve-reject-same-operation"
+      },
+      "synthetic_fixture_only": true
+    },
+    {
+      "id": "M1-DO-APPROVE-01",
+      "pair_id": "approve-reject-same-operation",
+      "dimension": "approval",
+      "variant": "approve",
+      "stage": "workflow_routing",
+      "description": "The same exact input operation and host/session state are approved and remain eligible through the bounded execution horizon.",
+      "decision": "APPROVE",
+      "operation_id": "fixture:input:001",
+      "requested_actions": [
+        "xenia.input.inject"
+      ],
+      "approved_actions": [
+        "xenia.input.inject"
+      ],
+      "route": "m1.input.inject.apply.v1",
+      "mutation": "none",
+      "operation_binding": {
+        "principal_ref": "principal:host-owner-synthetic",
+        "delegate_ref": "delegate:viewer-synthetic",
+        "host_resource_ref": "host:alpha",
+        "purpose": "remote_assistance",
+        "audience": "viewer:beta",
+        "session_fingerprint": "synthetic-session-01",
+        "session_epoch": 4,
+        "authority_epoch": 12,
+        "operation_fingerprint": "synthetic-only-not-cryptographic",
+        "operation_id": "fixture:paired:approve-reject-same-operation",
+        "approved_operation_fingerprint": "approved:approve-reject-same-operation",
+        "requested_operation_fingerprint": "approved:approve-reject-same-operation",
+        "upstream_state_fingerprint": "frozen-state:approve-reject-same-operation",
+        "active_session_epoch": 4,
+        "requested_session_epoch": 4,
+        "approved_effect_resource_ref": "effect-resource:approve-reject-same-operation",
+        "requested_effect_resource_ref": "effect-resource:approve-reject-same-operation"
+      },
+      "synthetic_fixture_only": true
+    },
+    {
+      "id": "M1-DO-PARALLEL-01",
+      "pair_id": "parallel-approved-branches",
+      "dimension": "harness_completeness",
+      "variant": "all_branches_preserved",
+      "stage": "harness_scheduling",
+      "description": "Two independently approved lanes are scheduled in parallel and both reach their exact effect owners.",
+      "decision": "APPROVE",
+      "operation_id": "fixture:parallel:001",
+      "requested_actions": [
+        "xenia.screen.view",
+        "xenia.host.telemetry"
+      ],
+      "approved_actions": [
+        "xenia.screen.view",
+        "xenia.host.telemetry"
+      ],
+      "route": "m1.screen.frame.disclosure.v1+m1.telemetry.disclosure.v1",
+      "mutation": "none",
+      "operation_binding": {
+        "principal_ref": "principal:host-owner-synthetic",
+        "delegate_ref": "delegate:viewer-synthetic",
+        "host_resource_ref": "host:alpha",
+        "purpose": "remote_assistance",
+        "audience": "viewer:beta",
+        "session_fingerprint": "synthetic-session-01",
+        "session_epoch": 4,
+        "authority_epoch": 12,
+        "operation_fingerprint": "synthetic-only-not-cryptographic",
+        "operation_id": "fixture:paired:parallel-approved-branches",
+        "approved_operation_fingerprint": "approved:parallel-approved-branches",
+        "requested_operation_fingerprint": "approved:parallel-approved-branches",
+        "upstream_state_fingerprint": "frozen-state:parallel-approved-branches",
+        "active_session_epoch": 4,
+        "requested_session_epoch": 4,
+        "approved_effect_resource_ref": "effect-resource:parallel-approved-branches",
+        "requested_effect_resource_ref": "effect-resource:parallel-approved-branches"
+      },
+      "synthetic_fixture_only": true
+    },
+    {
+      "id": "M1-DO-PARALLEL-02",
+      "pair_id": "parallel-approved-branches",
+      "dimension": "harness_completeness",
+      "variant": "restoration_drops_branch",
+      "stage": "harness_restore",
+      "description": "The exact same two approved lane operations are restored after restart, but the scheduler silently omits telemetry.",
+      "decision": "APPROVE",
+      "operation_id": "fixture:parallel:001",
+      "requested_actions": [
+        "xenia.screen.view",
+        "xenia.host.telemetry"
+      ],
+      "approved_actions": [
+        "xenia.screen.view",
+        "xenia.host.telemetry"
+      ],
+      "route": "m1.screen.frame.disclosure.v1+m1.telemetry.disclosure.v1",
+      "mutation": "lost_approved_branch",
+      "operation_binding": {
+        "principal_ref": "principal:host-owner-synthetic",
+        "delegate_ref": "delegate:viewer-synthetic",
+        "host_resource_ref": "host:alpha",
+        "purpose": "remote_assistance",
+        "audience": "viewer:beta",
+        "session_fingerprint": "synthetic-session-01",
+        "session_epoch": 4,
+        "authority_epoch": 12,
+        "operation_fingerprint": "synthetic-only-not-cryptographic",
+        "operation_id": "fixture:paired:parallel-approved-branches",
+        "approved_operation_fingerprint": "approved:parallel-approved-branches",
+        "requested_operation_fingerprint": "approved:parallel-approved-branches",
+        "upstream_state_fingerprint": "frozen-state:parallel-approved-branches",
+        "active_session_epoch": 4,
+        "requested_session_epoch": 4,
+        "approved_effect_resource_ref": "effect-resource:parallel-approved-branches",
+        "requested_effect_resource_ref": "effect-resource:parallel-approved-branches"
+      },
+      "synthetic_fixture_only": true
+    },
+    {
+      "id": "M1-DO-WORKFLOW-01",
+      "pair_id": "workflow-reject-enforcement",
+      "dimension": "workflow_routing",
+      "variant": "reject_stops",
+      "stage": "workflow_routing",
+      "description": "A workflow receives REJECT and the rejection is enforced before all reachable transport and effect routes.",
+      "decision": "REJECT",
+      "operation_id": "fixture:clipboard:reject:001",
+      "requested_actions": [
+        "xenia.clipboard.write"
+      ],
+      "approved_actions": [],
+      "route": "m1.clipboard.write.apply.v1",
+      "mutation": "none",
+      "operation_binding": {
+        "principal_ref": "principal:host-owner-synthetic",
+        "delegate_ref": "delegate:viewer-synthetic",
+        "host_resource_ref": "host:alpha",
+        "purpose": "remote_assistance",
+        "audience": "viewer:beta",
+        "session_fingerprint": "synthetic-session-01",
+        "session_epoch": 4,
+        "authority_epoch": 12,
+        "operation_fingerprint": "synthetic-only-not-cryptographic",
+        "operation_id": "fixture:paired:workflow-reject-enforcement",
+        "approved_operation_fingerprint": "approved:workflow-reject-enforcement",
+        "requested_operation_fingerprint": "approved:workflow-reject-enforcement",
+        "upstream_state_fingerprint": "frozen-state:workflow-reject-enforcement",
+        "active_session_epoch": 4,
+        "requested_session_epoch": 4,
+        "approved_effect_resource_ref": "effect-resource:workflow-reject-enforcement",
+        "requested_effect_resource_ref": "effect-resource:workflow-reject-enforcement"
+      },
+      "synthetic_fixture_only": true
+    },
+    {
+      "id": "M1-DO-WORKFLOW-02",
+      "pair_id": "workflow-reject-enforcement",
+      "dimension": "workflow_routing",
+      "variant": "reject_bypassed",
+      "stage": "workflow_routing",
+      "description": "The workflow records REJECT but a background/alternate route still attempts the clipboard write.",
+      "decision": "REJECT",
+      "operation_id": "fixture:clipboard:reject:001",
+      "requested_actions": [
+        "xenia.clipboard.write"
+      ],
+      "approved_actions": [],
+      "route": "unknown_route:background_clipboard_worker",
+      "mutation": "reject_payload_bypass",
+      "operation_binding": {
+        "principal_ref": "principal:host-owner-synthetic",
+        "delegate_ref": "delegate:viewer-synthetic",
+        "host_resource_ref": "host:alpha",
+        "purpose": "remote_assistance",
+        "audience": "viewer:beta",
+        "session_fingerprint": "synthetic-session-01",
+        "session_epoch": 4,
+        "authority_epoch": 12,
+        "operation_fingerprint": "synthetic-only-not-cryptographic",
+        "operation_id": "fixture:paired:workflow-reject-enforcement",
+        "approved_operation_fingerprint": "approved:workflow-reject-enforcement",
+        "requested_operation_fingerprint": "approved:workflow-reject-enforcement",
+        "upstream_state_fingerprint": "frozen-state:workflow-reject-enforcement",
+        "active_session_epoch": 4,
+        "requested_session_epoch": 4,
+        "approved_effect_resource_ref": "effect-resource:workflow-reject-enforcement",
+        "requested_effect_resource_ref": "effect-resource:workflow-reject-enforcement"
+      },
+      "synthetic_fixture_only": true
+    },
+    {
+      "id": "M1-DO-REVOKE-01",
+      "pair_id": "approve-revoke-before-commit",
+      "dimension": "temporal_scope",
+      "variant": "approved_then_revoked",
+      "stage": "effect_owner",
+      "description": "An operation is approved and queued, then current revocation is observed by the effect owner before commit.",
+      "decision": "APPROVE_THEN_REVOKE",
+      "operation_id": "fixture:file:revoke:001",
+      "requested_actions": [
+        "xenia.file.receive"
+      ],
+      "approved_actions": [
+        "xenia.file.receive"
+      ],
+      "route": "m1.file.receive.v1",
+      "mutation": "revoked_before_commit",
+      "operation_binding": {
+        "principal_ref": "principal:host-owner-synthetic",
+        "delegate_ref": "delegate:viewer-synthetic",
+        "host_resource_ref": "host:alpha",
+        "purpose": "remote_assistance",
+        "audience": "viewer:beta",
+        "session_fingerprint": "synthetic-session-01",
+        "session_epoch": 4,
+        "authority_epoch": 12,
+        "operation_fingerprint": "synthetic-only-not-cryptographic",
+        "operation_id": "fixture:file:revoke:001",
+        "approved_operation_fingerprint": "approved:approve-revoke-before-commit",
+        "requested_operation_fingerprint": "approved:approve-revoke-before-commit",
+        "upstream_state_fingerprint": "frozen-state:approve-revoke-before-commit",
+        "active_session_epoch": 4,
+        "requested_session_epoch": 4,
+        "approved_effect_resource_ref": "effect-resource:approve-revoke-before-commit",
+        "requested_effect_resource_ref": "effect-resource:approve-revoke-before-commit",
+        "revocation_observed_before_commit": true
+      },
+      "synthetic_fixture_only": true
+    },
+    {
+      "id": "M1-DO-RESTORE-01",
+      "pair_id": "restore-revalidate-currentness",
+      "dimension": "harness_restore",
+      "variant": "restored_needs_revalidation",
+      "stage": "harness_restore",
+      "description": "A pending approval is restored after daemon restart but current consent/authority/session state cannot be verified.",
+      "decision": "APPROVE_BEFORE_RESTART",
+      "operation_id": "fixture:audio:restore:001",
+      "requested_actions": [
+        "xenia.audio.capture"
+      ],
+      "approved_actions": [
+        "xenia.audio.capture"
+      ],
+      "route": "m1.audio.disclosure.v1",
+      "mutation": "currentness_unavailable_after_restore",
+      "operation_binding": {
+        "principal_ref": "principal:host-owner-synthetic",
+        "delegate_ref": "delegate:viewer-synthetic",
+        "host_resource_ref": "host:alpha",
+        "purpose": "remote_assistance",
+        "audience": "viewer:beta",
+        "session_fingerprint": "synthetic-session-01",
+        "session_epoch": 4,
+        "authority_epoch": 12,
+        "operation_fingerprint": "synthetic-only-not-cryptographic",
+        "operation_id": "fixture:audio:restore:001",
+        "approved_operation_fingerprint": "approved:restore-revalidate-currentness",
+        "requested_operation_fingerprint": "approved:restore-revalidate-currentness",
+        "upstream_state_fingerprint": "frozen-state:restore-revalidate-currentness",
+        "active_session_epoch": 4,
+        "requested_session_epoch": 4,
+        "approved_effect_resource_ref": "effect-resource:restore-revalidate-currentness",
+        "requested_effect_resource_ref": "effect-resource:restore-revalidate-currentness",
+        "restored_currentness": "unknown"
+      },
+      "synthetic_fixture_only": true
+    }
+  ],
+  "pairing_contract": {
+    "rule": "Every paired scenario reuses one operation_id and frozen upstream-state fingerprint. Only the declared decision, requested scope, route, session epoch, or fault mutation may differ.",
+    "matched_pair_ids": [
+      "data-minimization",
+      "tool-minimization",
+      "resource-scope",
+      "temporal-scope",
+      "approve-reject-same-operation",
+      "parallel-approved-branches",
+      "workflow-reject-enforcement"
+    ],
+    "same_state_fields": [
+      "principal_ref",
+      "delegate_ref",
+      "host_resource_ref",
+      "purpose",
+      "audience",
+      "session_fingerprint",
+      "upstream_state_fingerprint"
+    ],
+    "mutation_specific_fields": [
+      "requested_actions",
+      "route",
+      "session_epoch",
+      "authority_epoch",
+      "decision",
+      "mutation"
+    ]
+  }
+}

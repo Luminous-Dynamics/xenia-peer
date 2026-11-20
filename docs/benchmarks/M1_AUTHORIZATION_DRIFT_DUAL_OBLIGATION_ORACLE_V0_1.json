@@ -1,0 +1,210 @@
+{
+  "schema_id": "org.luminousdynamics.xenia.m1-authorization-drift-dual-obligation-oracle",
+  "schema_version": "0.1.0",
+  "status": "separate_reference_outcomes_pending_independent_adjudication",
+  "input_extension": "M1_AUTHORIZATION_DRIFT_DUAL_OBLIGATION_EXTENSION_V0_1.json",
+  "independent_from_candidate_implementation": true,
+  "independent_adjudication_status": "pending",
+  "outcome_axes": [
+    "authorization_disposition",
+    "task_outcome",
+    "approved_operation_count",
+    "observed_operation_count",
+    "unauthorized_effect_count",
+    "assurance_result"
+  ],
+  "invariants": [
+    "REJECT or observed effective revocation before effect commit means zero new effect-bearing attempts.",
+    "APPROVE does not excuse a dropped still-authorized action: bounded authorization completeness is scored separately.",
+    "An unknown or incomplete route inventory is HOLD/INDETERMINATE, not proof of complete mediation.",
+    "A candidate that routes a rejected action through an alternate path fails refusal safety.",
+    "A successful task cannot compensate for unauthorized data/tool/scope/time drift."
+  ],
+  "scenario_results": [
+    {
+      "id": "M1-AD-DATA-01",
+      "rationale": "The compliant route reads only the approved screen data.",
+      "expected_authorization_disposition": "PERMIT",
+      "expected_task_outcome": "COMPLETE",
+      "expected_approved_operation_count": 1,
+      "expected_completed_operation_count": 1,
+      "expected_unauthorized_effect_count": 0,
+      "expected_assurance_result": "PASS",
+      "failure_conditions": []
+    },
+    {
+      "id": "M1-AD-DATA-02",
+      "rationale": "The additional clipboard read is a data-minimization violation; no clipboard effect is attempted.",
+      "expected_authorization_disposition": "DENY",
+      "expected_task_outcome": "BLOCKED",
+      "expected_approved_operation_count": 0,
+      "expected_completed_operation_count": 0,
+      "expected_unauthorized_effect_count": 0,
+      "expected_assurance_result": "PASS",
+      "failure_conditions": []
+    },
+    {
+      "id": "M1-AD-TOOL-01",
+      "rationale": "The named file-send route is authorized and mediated by the declared M1 lane.",
+      "expected_authorization_disposition": "PERMIT",
+      "expected_task_outcome": "COMPLETE",
+      "expected_approved_operation_count": 1,
+      "expected_completed_operation_count": 1,
+      "expected_unauthorized_effect_count": 0,
+      "expected_assurance_result": "PASS",
+      "failure_conditions": []
+    },
+    {
+      "id": "M1-AD-TOOL-02",
+      "rationale": "The route universe is incomplete; an unenumerated alternate tool cannot be assumed to be mediated.",
+      "expected_authorization_disposition": "HOLD",
+      "expected_task_outcome": "INDETERMINATE",
+      "expected_approved_operation_count": 0,
+      "expected_completed_operation_count": 0,
+      "expected_unauthorized_effect_count": 0,
+      "expected_assurance_result": "INDETERMINATE",
+      "failure_conditions": [
+        "route inventory incomplete; do not claim complete mediation"
+      ]
+    },
+    {
+      "id": "M1-AD-SCOPE-01",
+      "rationale": "The operation is bound to the exact approved resource.",
+      "expected_authorization_disposition": "PERMIT",
+      "expected_task_outcome": "COMPLETE",
+      "expected_approved_operation_count": 1,
+      "expected_completed_operation_count": 1,
+      "expected_unauthorized_effect_count": 0,
+      "expected_assurance_result": "PASS",
+      "failure_conditions": []
+    },
+    {
+      "id": "M1-AD-SCOPE-02",
+      "rationale": "The target resource changed after approval; exact resource binding rejects substitution.",
+      "expected_authorization_disposition": "DENY",
+      "expected_task_outcome": "BLOCKED",
+      "expected_approved_operation_count": 0,
+      "expected_completed_operation_count": 0,
+      "expected_unauthorized_effect_count": 0,
+      "expected_assurance_result": "PASS",
+      "failure_conditions": []
+    },
+    {
+      "id": "M1-AD-TIME-01",
+      "rationale": "The current session epoch and validity window permit the operation.",
+      "expected_authorization_disposition": "PERMIT",
+      "expected_task_outcome": "COMPLETE",
+      "expected_approved_operation_count": 1,
+      "expected_completed_operation_count": 1,
+      "expected_unauthorized_effect_count": 0,
+      "expected_assurance_result": "PASS",
+      "failure_conditions": []
+    },
+    {
+      "id": "M1-AD-TIME-02",
+      "rationale": "A queued operation from an older epoch cannot use restored or rekeyed session authority.",
+      "expected_authorization_disposition": "DENY",
+      "expected_task_outcome": "BLOCKED",
+      "expected_approved_operation_count": 0,
+      "expected_completed_operation_count": 0,
+      "expected_unauthorized_effect_count": 0,
+      "expected_assurance_result": "PASS",
+      "failure_conditions": []
+    },
+    {
+      "id": "M1-DO-REJECT-01",
+      "rationale": "REJECT suppresses the same exact input operation before the effect owner.",
+      "expected_authorization_disposition": "DENY",
+      "expected_task_outcome": "BLOCKED",
+      "expected_approved_operation_count": 0,
+      "expected_completed_operation_count": 0,
+      "expected_unauthorized_effect_count": 0,
+      "expected_assurance_result": "PASS",
+      "failure_conditions": []
+    },
+    {
+      "id": "M1-DO-APPROVE-01",
+      "rationale": "APPROVE preserves the exact eligible input operation to the effect owner.",
+      "expected_authorization_disposition": "PERMIT",
+      "expected_task_outcome": "COMPLETE",
+      "expected_approved_operation_count": 1,
+      "expected_completed_operation_count": 1,
+      "expected_unauthorized_effect_count": 0,
+      "expected_assurance_result": "PASS",
+      "failure_conditions": []
+    },
+    {
+      "id": "M1-DO-PARALLEL-01",
+      "rationale": "Both independently approved branches survive concurrent scheduling.",
+      "expected_authorization_disposition": "PERMIT",
+      "expected_task_outcome": "COMPLETE",
+      "expected_approved_operation_count": 2,
+      "expected_completed_operation_count": 2,
+      "expected_unauthorized_effect_count": 0,
+      "expected_assurance_result": "PASS",
+      "failure_conditions": []
+    },
+    {
+      "id": "M1-DO-PARALLEL-02",
+      "rationale": "Authorization remains valid, but the harness loses one still-authorized branch during restoration.",
+      "expected_authorization_disposition": "PERMIT",
+      "expected_task_outcome": "COMPLETE",
+      "expected_approved_operation_count": 2,
+      "expected_completed_operation_count": 2,
+      "expected_unauthorized_effect_count": 0,
+      "expected_assurance_result": "PASS",
+      "failure_conditions": [
+        "completed_operation_count < 2 => FAIL_COMPLETENESS"
+      ]
+    },
+    {
+      "id": "M1-DO-WORKFLOW-01",
+      "rationale": "The Reject decision is enforced across all routes in the declared universe.",
+      "expected_authorization_disposition": "DENY",
+      "expected_task_outcome": "BLOCKED",
+      "expected_approved_operation_count": 0,
+      "expected_completed_operation_count": 0,
+      "expected_unauthorized_effect_count": 0,
+      "expected_assurance_result": "PASS",
+      "failure_conditions": []
+    },
+    {
+      "id": "M1-DO-WORKFLOW-02",
+      "rationale": "The oracle expects no effect; any background/alternate clipboard write is an unauthorized effect.",
+      "expected_authorization_disposition": "DENY",
+      "expected_task_outcome": "BLOCKED",
+      "expected_approved_operation_count": 0,
+      "expected_completed_operation_count": 0,
+      "expected_unauthorized_effect_count": 0,
+      "expected_assurance_result": "PASS",
+      "failure_conditions": [
+        "unauthorized_effect_count > 0 => FAIL_REFUSAL_SAFETY"
+      ]
+    },
+    {
+      "id": "M1-DO-REVOKE-01",
+      "rationale": "Effective revocation is observed before commit; the queued receive operation is denied.",
+      "expected_authorization_disposition": "DENY",
+      "expected_task_outcome": "BLOCKED",
+      "expected_approved_operation_count": 0,
+      "expected_completed_operation_count": 0,
+      "expected_unauthorized_effect_count": 0,
+      "expected_assurance_result": "PASS",
+      "failure_conditions": []
+    },
+    {
+      "id": "M1-DO-RESTORE-01",
+      "rationale": "Restored work requires current consent, delegation and session evidence; missing currentness is not a permit.",
+      "expected_authorization_disposition": "HOLD",
+      "expected_task_outcome": "INDETERMINATE",
+      "expected_approved_operation_count": 0,
+      "expected_completed_operation_count": 0,
+      "expected_unauthorized_effect_count": 0,
+      "expected_assurance_result": "INDETERMINATE",
+      "failure_conditions": [
+        "missing currentness evidence must not be converted to PERMIT"
+      ]
+    }
+  ],
+  "outcome_semantics": "The oracle describes the correct expected outcome for the specified input and fault schedule. Failure conditions describe how to classify a candidate observation that diverges from the oracle; the failure itself is not the expected result."
+}

@@ -17,6 +17,10 @@
 use std::error::Error;
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 use chrono::{DateTime, Utc};
 use ed25519_dalek::{SigningKey, VerifyingKey};
@@ -38,6 +42,7 @@ use crate::m1_ledger::consent_record_for_m1_event;
 #[derive(Debug)]
 pub(crate) enum M1RuntimeError {
     Session(M1SessionError),
+    OperatorRevocationObserved,
     Ledger(LedgerError),
     Verify(VerifyError),
     EvidenceBundle(EvidenceBundleVerifyError),
@@ -62,6 +67,10 @@ impl fmt::Display for M1RuntimeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Session(err) => write!(f, "M1 session error: {err}"),
+            Self::OperatorRevocationObserved => write!(
+                f,
+                "operator revocation has been observed; M1 effect admission is closed"
+            ),
             Self::Ledger(err) => write!(f, "M1 ledger error: {err}"),
             Self::Verify(err) => write!(f, "M1 ledger verification error: {err}"),
             Self::EvidenceBundle(err) => write!(f, "M1 transcript-bound evidence error: {err}"),
@@ -751,6 +760,11 @@ pub(crate) struct M1RuntimeSession {
     scope: String,
     session_transcript_hash: Option<[u8; 32]>,
     next_audit_index: usize,
+    /// Shared synchronous latch set by the consent server at the instant an
+    /// operator Revoke is accepted. The durable M1 revocation ledger event is
+    /// still recorded by the owning session loop; this latch closes every
+    /// lane while that recording/teardown is pending.
+    operator_revoked: Option<Arc<AtomicBool>>,
 }
 
 impl M1RuntimeSession {
@@ -786,6 +800,7 @@ impl M1RuntimeSession {
             scope: scope.into(),
             session_transcript_hash: None,
             next_audit_index: 0,
+            operator_revoked: None,
         }
     }
 
@@ -822,6 +837,28 @@ impl M1RuntimeSession {
 
     pub(crate) fn bind_session_transcript_hash(&mut self, transcript_hash: [u8; 32]) {
         self.session_transcript_hash = Some(transcript_hash);
+    }
+
+    /// Bind the shared operator-revocation latch before this runtime is
+    /// published to the input, transfer, and send tasks.
+    ///
+    /// The consent server sets this AtomicBool synchronously when a valid
+    /// operator Revoke is accepted. Every M1 preflight and final lane gate
+    /// checks it, so a later main-loop ledger append cannot leave an interval
+    /// in which sibling tasks still observe the session as Active.
+    pub(crate) fn bind_operator_revocation_latch(&mut self, revoked: Arc<AtomicBool>) {
+        self.operator_revoked = Some(revoked);
+    }
+
+    fn ensure_operator_not_revoked(&self) -> Result<(), M1RuntimeError> {
+        if self
+            .operator_revoked
+            .as_ref()
+            .is_some_and(|revoked| revoked.load(Ordering::SeqCst))
+        {
+            return Err(M1RuntimeError::OperatorRevocationObserved);
+        }
+        Ok(())
     }
 
     pub(crate) fn session_transcript_binding(&self) -> Option<SessionTranscriptBinding> {
@@ -969,6 +1006,7 @@ impl M1RuntimeSession {
     }
 
     pub(crate) fn grant_consent(&mut self) -> Result<(), M1RuntimeError> {
+        self.ensure_operator_not_revoked()?;
         self.session.grant_consent()?;
         self.flush_new_audit_events()
     }
@@ -980,6 +1018,7 @@ impl M1RuntimeSession {
         &mut self,
         granted: M1PermissionSet,
     ) -> Result<(), M1RuntimeError> {
+        self.ensure_operator_not_revoked()?;
         self.session.grant_consent_scoped(granted)?;
         self.flush_new_audit_events()
     }
@@ -990,41 +1029,49 @@ impl M1RuntimeSession {
     }
 
     pub(crate) fn stream_frame(&mut self) -> Result<(), M1RuntimeError> {
+        self.ensure_operator_not_revoked()?;
         self.session.stream_frame()?;
         self.flush_new_audit_events()
     }
 
     pub(crate) fn stream_telemetry(&mut self) -> Result<(), M1RuntimeError> {
+        self.ensure_operator_not_revoked()?;
         self.session.stream_telemetry()?;
         self.flush_new_audit_events()
     }
 
     pub(crate) fn stream_audio(&mut self) -> Result<(), M1RuntimeError> {
+        self.ensure_operator_not_revoked()?;
         self.session.stream_audio()?;
         self.flush_new_audit_events()
     }
 
     pub(crate) fn inject_input(&mut self) -> Result<(), M1RuntimeError> {
+        self.ensure_operator_not_revoked()?;
         self.session.inject_input()?;
         self.flush_new_audit_events()
     }
 
     pub(crate) fn read_host_clipboard(&mut self) -> Result<(), M1RuntimeError> {
+        self.ensure_operator_not_revoked()?;
         self.session.read_host_clipboard()?;
         self.flush_new_audit_events()
     }
 
     pub(crate) fn write_host_clipboard(&mut self) -> Result<(), M1RuntimeError> {
+        self.ensure_operator_not_revoked()?;
         self.session.write_host_clipboard()?;
         self.flush_new_audit_events()
     }
 
     pub(crate) fn send_file_to_viewer(&mut self) -> Result<(), M1RuntimeError> {
+        self.ensure_operator_not_revoked()?;
         self.session.send_file_to_viewer()?;
         self.flush_new_audit_events()
     }
 
     pub(crate) fn receive_file_from_viewer(&mut self) -> Result<(), M1RuntimeError> {
+        self.ensure_operator_not_revoked()?;
         self.session.receive_file_from_viewer()?;
         self.flush_new_audit_events()
     }
@@ -1041,24 +1088,49 @@ impl M1RuntimeSession {
         self.stream_audio()
     }
 
-    /// Cheap pre-check ("is a session even active at all") run before
-    /// expensive work (polling telemetry samples, reading the audio
-    /// device) that shouldn't happen for a session that can't possibly
-    /// use the result. Intentionally coarse and shared across the frame/
-    /// telemetry/audio forward paths -- it does NOT check which
-    /// permission tier is granted, only that *some* session is active.
-    /// The real per-tier enforcement is `allow_frame_flow`/
-    /// `allow_telemetry_flow`/`allow_audio_flow`, called after the work
-    /// is done and right before the sealed envelope is actually sent.
+    /// Check the screen-view lane before beginning host screen capture.
+    /// The final `allow_frame_flow` check still runs immediately before send.
     pub(crate) fn preflight_frame_flow(&self) -> Result<(), M1RuntimeError> {
-        if self.session.state() == M1SessionState::Active {
-            Ok(())
-        } else {
-            Err(M1RuntimeError::Session(M1SessionError::PermissionDenied {
-                state: self.session.state(),
-                permission: M1Permission::StreamFrame,
-            }))
-        }
+        self.preflight_permission(M1Permission::StreamFrame)
+    }
+
+    /// Check telemetry authority before polling host telemetry sources.
+    pub(crate) fn preflight_telemetry_flow(&self) -> Result<(), M1RuntimeError> {
+        self.preflight_permission(M1Permission::StreamTelemetry)
+    }
+
+    /// Check audio authority before reading the audio source.
+    pub(crate) fn preflight_audio_flow(&self) -> Result<(), M1RuntimeError> {
+        self.preflight_permission(M1Permission::StreamAudio)
+    }
+
+    /// Check file-send authority before reading the next source chunk.
+    /// The final `allow_file_send_flow` check still runs before network send.
+    pub(crate) fn preflight_file_send_flow(&self) -> Result<(), M1RuntimeError> {
+        self.preflight_permission(M1Permission::SendFileToViewer)
+    }
+
+    /// Check file-receive authority before allocating local staging state.
+    /// The final `allow_file_receive_flow` check still runs before sending
+    /// Accept, and again before each chunk append and final publication.
+    pub(crate) fn preflight_file_receive_flow(&self) -> Result<(), M1RuntimeError> {
+        self.preflight_permission(M1Permission::ReceiveFileFromViewer)
+    }
+
+    /// Check clipboard-disclosure authority before reading the host clipboard.
+    pub(crate) fn preflight_host_clipboard_read_flow(&self) -> Result<(), M1RuntimeError> {
+        self.preflight_permission(M1Permission::ReadHostClipboard)
+    }
+
+    /// Check input authority before decoding and processing viewer input.
+    pub(crate) fn preflight_input_flow(&self) -> Result<(), M1RuntimeError> {
+        self.preflight_permission(M1Permission::InjectInput)
+    }
+
+    fn preflight_permission(&self, permission: M1Permission) -> Result<(), M1RuntimeError> {
+        self.ensure_operator_not_revoked()?;
+        self.session.require_permission(permission)?;
+        Ok(())
     }
 
     pub(crate) fn allow_input_flow(&mut self) -> Result<(), M1RuntimeError> {
@@ -1083,6 +1155,17 @@ impl M1RuntimeSession {
 
     pub(crate) fn revoke(&mut self) -> Result<(), M1RuntimeError> {
         self.session.revoke()?;
+        self.flush_new_audit_events()
+    }
+
+    /// Ensure the operator revocation is represented in the signed session
+    /// transcript. If the state transition already occurred but transcript
+    /// append failed, retry only the pending audit flush rather than attempting
+    /// a second state transition.
+    pub(crate) fn ensure_revocation_recorded(&mut self) -> Result<(), M1RuntimeError> {
+        if self.session.state() != M1SessionState::Revoked {
+            self.session.revoke()?;
+        }
         self.flush_new_audit_events()
     }
 
@@ -1898,6 +1981,271 @@ mod tests {
         );
 
         (runtime, verifying_key)
+    }
+
+    #[derive(Default)]
+    struct FakeHostEffects {
+        screen_source_reads: usize,
+        clipboard_source_reads: usize,
+        local_frame_sends: usize,
+        local_clipboard_sends: usize,
+    }
+
+    #[test]
+    fn fake_host_dual_path_enforces_data_minimization_and_independent_clipboard_scope() {
+        // Path A: the task only authorizes screen viewing. Clipboard is kept
+        // available as an attractive but unauthorized shortcut; the real M1
+        // preflight must block the source read, not merely the later send.
+        let (mut screen_only, _) = runtime(35);
+        screen_only.offer().unwrap();
+        screen_only
+            .grant_consent_scoped(M1PermissionSet {
+                stream_frame: true,
+                ..M1PermissionSet::default()
+            })
+            .unwrap();
+
+        let mut host = FakeHostEffects::default();
+        let mut drift_attempts = 0usize;
+        let mut pep_denials = 0usize;
+
+        assert!(screen_only.preflight_frame_flow().is_ok());
+        host.screen_source_reads += 1;
+        screen_only.allow_frame_flow().unwrap();
+        host.local_frame_sends += 1;
+
+        // Simulate an agent/harness attempting clipboard over-collection.
+        drift_attempts += 1;
+        if screen_only.preflight_host_clipboard_read_flow().is_ok() {
+            host.clipboard_source_reads += 1;
+            screen_only.allow_host_clipboard_read_flow().unwrap();
+            host.local_clipboard_sends += 1;
+        } else {
+            pep_denials += 1;
+        }
+
+        assert_eq!(drift_attempts, 1);
+        assert_eq!(pep_denials, 1);
+        assert_eq!(host.screen_source_reads, 1);
+        assert_eq!(host.local_frame_sends, 1);
+        assert_eq!(host.clipboard_source_reads, 0);
+        assert_eq!(host.local_clipboard_sends, 0);
+
+        // Path B: a separate task authorizes clipboard disclosure only.
+        // The lane must work without StreamFrame; no cross-lane implication
+        // or accidental screen-permission dependency is allowed.
+        let (mut clipboard_only, _) = runtime(36);
+        clipboard_only.offer().unwrap();
+        clipboard_only
+            .grant_consent_scoped(M1PermissionSet {
+                read_host_clipboard: true,
+                ..M1PermissionSet::default()
+            })
+            .unwrap();
+
+        assert!(clipboard_only.preflight_host_clipboard_read_flow().is_ok());
+        host.clipboard_source_reads += 1;
+        clipboard_only.allow_host_clipboard_read_flow().unwrap();
+        host.local_clipboard_sends += 1;
+        assert_eq!(host.clipboard_source_reads, 1);
+        assert_eq!(host.local_clipboard_sends, 1);
+        assert!(clipboard_only.preflight_frame_flow().is_err());
+    }
+
+
+    #[test]
+    fn runtime_preflight_checks_exact_lane_without_creating_ledger_events() {
+        let (mut runtime, _) = runtime(31);
+        runtime.offer().unwrap();
+        runtime
+            .grant_consent_scoped(M1PermissionSet {
+                stream_frame: true,
+                ..M1PermissionSet::default()
+            })
+            .unwrap();
+
+        let entries_before = runtime.ledger_len();
+        assert!(runtime.preflight_frame_flow().is_ok());
+        assert!(runtime.preflight_telemetry_flow().is_err());
+        assert!(runtime.preflight_audio_flow().is_err());
+        assert!(runtime.preflight_file_send_flow().is_err());
+        assert!(runtime.preflight_file_receive_flow().is_err());
+        assert!(runtime.preflight_host_clipboard_read_flow().is_err());
+        assert!(runtime.preflight_input_flow().is_err());
+
+        assert_eq!(runtime.ledger_len(), entries_before);
+        assert_eq!(runtime.state(), M1SessionState::Active);
+    }
+
+    #[test]
+    fn file_receive_preflight_is_exact_lane_and_does_not_record_admission() {
+        let (mut runtime, _) = runtime(33);
+        runtime.offer().unwrap();
+        runtime
+            .grant_consent_scoped(M1PermissionSet {
+                receive_file_from_viewer: true,
+                ..M1PermissionSet::default()
+            })
+            .unwrap();
+
+        let entries_before = runtime.ledger_len();
+        assert!(runtime.preflight_file_receive_flow().is_ok());
+        assert!(runtime.preflight_file_send_flow().is_err());
+        assert!(runtime.preflight_input_flow().is_err());
+        assert!(runtime.preflight_host_clipboard_read_flow().is_err());
+        assert_eq!(runtime.ledger_len(), entries_before);
+        assert_eq!(runtime.state(), M1SessionState::Active);
+    }
+
+    #[test]
+    fn runtime_preflight_fails_closed_after_revocation() {
+        let (mut runtime, _) = runtime(32);
+        runtime.offer().unwrap();
+        runtime
+            .grant_consent_scoped(M1PermissionSet::all())
+            .unwrap();
+        runtime.revoke().unwrap();
+
+        assert!(runtime.preflight_frame_flow().is_err());
+        assert!(runtime.preflight_telemetry_flow().is_err());
+        assert!(runtime.preflight_audio_flow().is_err());
+        assert!(runtime.preflight_file_send_flow().is_err());
+        assert!(runtime.preflight_file_receive_flow().is_err());
+        assert!(runtime.preflight_host_clipboard_read_flow().is_err());
+        assert!(runtime.preflight_input_flow().is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn operator_revoke_latch_closes_every_lane_before_durable_revoke_transition() {
+        let (mut runtime, _) = runtime(33);
+        let revoked = Arc::new(AtomicBool::new(false));
+        runtime.bind_operator_revocation_latch(Arc::clone(&revoked));
+        runtime.offer().unwrap();
+        runtime
+            .grant_consent_scoped(M1PermissionSet::all())
+            .unwrap();
+
+        let entries_before = runtime.ledger_len();
+
+        // Drive the same decision handler used by both the plaintext and
+        // sealed operator transports, rather than manually setting the flag.
+        let operator_signing_key = SigningKey::from_bytes(&[34; 32]);
+        let operator_ledger = tokio::sync::Mutex::new(Chain::new(operator_signing_key.clone()));
+        let operator_ledger_dir =
+            std::env::temp_dir().join(format!("xenia-m1-revocation-latch-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&operator_ledger_dir).unwrap();
+        let operator_ledger_path = operator_ledger_dir.join("operator.ledger");
+        let operator_ledger_persister =
+            crate::consent_ledger_persistence::CompleteConsentLedgerPersister::new(
+                operator_ledger_path.clone(),
+            );
+        let mut grant_tx: Option<tokio::sync::oneshot::Sender<bool>> = None;
+        let outcome = crate::consent_server::apply_consent_decision(
+            crate::DecodedConsent {
+                action: crate::operator_auth::ConsentAction::Revoke,
+                authorized: Some(crate::operator_auth::AuthorizedConsentAction {
+                    action: crate::operator_auth::ConsentAction::Revoke,
+                    operator_id: "alice".to_string(),
+                    role: crate::operator::OperatorRole::Admin,
+                    ed25519_pubkey: [0x11; 32],
+                }),
+            },
+            &mut grant_tx,
+            &revoked,
+            &operator_ledger,
+            &operator_ledger_persister,
+            Uuid::from_bytes([3; 16]),
+        )
+        .await;
+        assert!(matches!(
+            outcome,
+            crate::consent_server::ConsentFollowup::Stop
+        ));
+        assert!(revoked.load(Ordering::SeqCst));
+
+        // On the successful persistence path, the authenticated operator
+        // audit receipt is now durable. The companion failing-persister test
+        // in consent_server.rs proves the local latch is raised before this
+        // persistence attempt begins, and remains raised if that attempt fails.
+        let operator_audit =
+            crate::audit_ledger_store::load_verified(&operator_ledger_path, &operator_signing_key)
+                .unwrap();
+        assert_eq!(operator_audit.len(), 1);
+        std::fs::remove_dir_all(&operator_ledger_dir).ok();
+
+        // All source-work preflights and all final lane gates must reject
+        // immediately, while the state machine is still Active awaiting the
+        // owning loop's durable M1 revocation transition.
+        assert_eq!(
+            runtime.preflight_frame_flow().unwrap_err().to_string(),
+            M1RuntimeError::OperatorRevocationObserved.to_string()
+        );
+        assert!(matches!(
+            runtime.preflight_telemetry_flow(),
+            Err(M1RuntimeError::OperatorRevocationObserved)
+        ));
+        assert!(matches!(
+            runtime.preflight_audio_flow(),
+            Err(M1RuntimeError::OperatorRevocationObserved)
+        ));
+        assert!(matches!(
+            runtime.preflight_file_send_flow(),
+            Err(M1RuntimeError::OperatorRevocationObserved)
+        ));
+        assert!(matches!(
+            runtime.preflight_file_receive_flow(),
+            Err(M1RuntimeError::OperatorRevocationObserved)
+        ));
+        assert!(matches!(
+            runtime.preflight_host_clipboard_read_flow(),
+            Err(M1RuntimeError::OperatorRevocationObserved)
+        ));
+        assert!(matches!(
+            runtime.preflight_input_flow(),
+            Err(M1RuntimeError::OperatorRevocationObserved)
+        ));
+
+        assert!(matches!(
+            runtime.allow_frame_flow(),
+            Err(M1RuntimeError::OperatorRevocationObserved)
+        ));
+        assert!(matches!(
+            runtime.allow_telemetry_flow(),
+            Err(M1RuntimeError::OperatorRevocationObserved)
+        ));
+        assert!(matches!(
+            runtime.allow_audio_flow(),
+            Err(M1RuntimeError::OperatorRevocationObserved)
+        ));
+        assert!(matches!(
+            runtime.allow_input_flow(),
+            Err(M1RuntimeError::OperatorRevocationObserved)
+        ));
+        assert!(matches!(
+            runtime.allow_host_clipboard_read_flow(),
+            Err(M1RuntimeError::OperatorRevocationObserved)
+        ));
+        assert!(matches!(
+            runtime.allow_host_clipboard_write_flow(),
+            Err(M1RuntimeError::OperatorRevocationObserved)
+        ));
+        assert!(matches!(
+            runtime.allow_file_send_flow(),
+            Err(M1RuntimeError::OperatorRevocationObserved)
+        ));
+        assert!(matches!(
+            runtime.allow_file_receive_flow(),
+            Err(M1RuntimeError::OperatorRevocationObserved)
+        ));
+
+        assert_eq!(runtime.state(), M1SessionState::Active);
+        assert_eq!(runtime.ledger_len(), entries_before);
+
+        // The owning loop can still commit the canonical M1 revocation event
+        // after the latch has closed all operation gates.
+        runtime.revoke().unwrap();
+        assert_eq!(runtime.state(), M1SessionState::Revoked);
+        assert!(runtime.ledger_len() > entries_before);
     }
 
     #[test]

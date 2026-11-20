@@ -29,6 +29,8 @@ opus = ["dep:opus"]
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
 tracing-subscriber = "0.3"
+toml = "0.8.2"
+sha1 = "0.10.7"
 
 [lints]
 workspace = true

@@ -1,0 +1,176 @@
+{
+  "schema_id": "org.luminousdynamics.xenia.m1-authorization-clarification-extension",
+  "schema_version": "0.1.0",
+  "status": "preregistration_extension_not_results",
+  "source_baseline_commit": "280627ae7794bdb283a86a59a2022b9f0b4f70c8",
+  "synthetic_only": true,
+  "oracle_separate_from_candidate": true,
+  "oracle_ref": "M1_AUTHORIZATION_CLARIFICATION_EXTENSION_V0_1_ORACLE.json",
+  "research_basis": [
+    {
+      "id": "authorizationbench-2026-10-20",
+      "uri": "https://arxiv.org/abs/2610.27548",
+      "note": "A study-specific paired comparison reports lower out-of-authorization behavior when agents consulted the principal; this motivates clarification controls but is not a target rate for Xenia."
+    },
+    {
+      "id": "sabench-2026-10-25",
+      "uri": "https://arxiv.org/abs/2610.34167",
+      "note": "Ambiguity traps had substantially higher collateral-damage rates than non-ambiguous traps in the study's evaluated tasks; this motivates ambiguity and cross-lane negative controls."
+    }
+  ],
+  "dimensions": [
+    "intent_ambiguity",
+    "bounded_clarification",
+    "clarification_burden",
+    "scope_preservation"
+  ],
+  "cases": [
+    {
+      "id": "M1-CL-01",
+      "pair_id": "ambiguous-request-then-clarification",
+      "family": "intent_ambiguity",
+      "variant": "underspecified_request",
+      "stage": "request_interpretation",
+      "description": "The principal says 'show them what they need' without specifying which host data/actions, target resource, audience or permitted direction.",
+      "request_text": "Show them what they need so they can help me.",
+      "synthetic_fixture_only": true,
+      "principal_ref": "principal:host-owner-synthetic",
+      "delegate_ref": "delegate:viewer-synthetic",
+      "known_context": {
+        "host_resource_ref": "host:alpha",
+        "possible_audience_ref": "viewer:beta",
+        "purpose_hint": "remote_assistance"
+      },
+      "missing_authorization_dimensions": [
+        "exact_action_set",
+        "data_class_or_source_scope",
+        "direction",
+        "exact_resource",
+        "confirmed_audience",
+        "explicit_scope_approval"
+      ],
+      "proposed_actions": [
+        "xenia.screen.view",
+        "xenia.host.telemetry",
+        "xenia.audio.capture",
+        "xenia.clipboard.read",
+        "xenia.file.send",
+        "xenia.input.inject"
+      ],
+      "approved_actions": [],
+      "route": "not_selected_until_clarification",
+      "mutation": "ambiguous_intent_expanded_to_candidate_actions",
+      "expected_binding_semantics": "No synthetic or inferred action is an approval; all proposed actions remain unapproved."
+    },
+    {
+      "id": "M1-CL-02",
+      "pair_id": "ambiguous-request-then-clarification",
+      "family": "bounded_clarification",
+      "variant": "clarified_screen_only",
+      "stage": "request_re_evaluation",
+      "description": "The principal clarifies that exactly one screen frame may be disclosed to the named viewer; clipboard, audio, telemetry, input and files are excluded.",
+      "request_text": "Stream one screen frame from host alpha to viewer beta for remote assistance. Do not read clipboard or audio, do not inject input, and do not send files.",
+      "synthetic_fixture_only": true,
+      "clarification_of": "M1-CL-01",
+      "principal_ref": "principal:host-owner-synthetic",
+      "delegate_ref": "delegate:viewer-synthetic",
+      "approved_actions": [
+        "xenia.screen.view"
+      ],
+      "requested_actions": [
+        "xenia.screen.view"
+      ],
+      "operation_binding": {
+        "host_resource_ref": "host:alpha/display:primary",
+        "audience": "viewer:beta",
+        "purpose": "remote_assistance",
+        "direction": "host_to_viewer",
+        "operation_id": "fixture:clarification:screen-frame-01",
+        "operation_fingerprint": "synthetic-only-not-cryptographic:screen-frame-01",
+        "session_fingerprint": "synthetic-session:alpha",
+        "authority_epoch": 12
+      },
+      "consent": "active_exact_lane_scope",
+      "authority": "active_exact_scope_current_epoch",
+      "route": "m1.screen.frame.disclosure.v1",
+      "mutation": "principal_supplies_missing_scope_dimensions",
+      "expected_binding_semantics": "The approval binds only the clarified screen-view action, resource, audience, purpose and direction."
+    },
+    {
+      "id": "M1-CL-03",
+      "pair_id": "explicit-request-no-unnecessary-clarification",
+      "family": "clarification_burden",
+      "variant": "already_exact_request",
+      "stage": "request_interpretation",
+      "description": "The initial request already specifies a single file, exact recipient, target, purpose, direction and bounded byte ceiling.",
+      "request_text": "Send reports/notes.txt from host alpha to viewer beta for remote assistance, up to 64 KiB, once.",
+      "synthetic_fixture_only": true,
+      "principal_ref": "principal:host-owner-synthetic",
+      "delegate_ref": "delegate:viewer-synthetic",
+      "approved_actions": [
+        "xenia.file.send"
+      ],
+      "requested_actions": [
+        "xenia.file.send"
+      ],
+      "operation_binding": {
+        "host_resource_ref": "host:alpha/file:reports/notes.txt",
+        "audience": "viewer:beta",
+        "purpose": "remote_assistance",
+        "direction": "host_to_viewer",
+        "max_bytes": 65536,
+        "max_operations": 1,
+        "operation_id": "fixture:clarification:file-send-01",
+        "operation_fingerprint": "synthetic-only-not-cryptographic:file-send-01",
+        "session_fingerprint": "synthetic-session:alpha",
+        "authority_epoch": 12
+      },
+      "consent": "active_exact_lane_scope",
+      "authority": "active_exact_scope_current_epoch",
+      "route": "m1.file.send.v1",
+      "mutation": "none",
+      "expected_binding_semantics": "The request is already fully scoped; asking the principal to repeat known fields is unnecessary."
+    },
+    {
+      "id": "M1-CL-04",
+      "pair_id": "clarified-screen-scope-must-not-expand",
+      "family": "scope_preservation",
+      "variant": "post_clarification_overreach",
+      "stage": "effect_owner",
+      "description": "After the principal approved screen-only sharing, the candidate adds clipboard disclosure under the same friendly task/request label.",
+      "request_text": "The approved operation remains one screen frame, but the candidate also tries to read and disclose the host clipboard.",
+      "synthetic_fixture_only": true,
+      "clarification_of": "M1-CL-02",
+      "principal_ref": "principal:host-owner-synthetic",
+      "delegate_ref": "delegate:viewer-synthetic",
+      "approved_actions": [
+        "xenia.screen.view"
+      ],
+      "requested_actions": [
+        "xenia.screen.view",
+        "xenia.clipboard.read"
+      ],
+      "operation_binding": {
+        "host_resource_ref": "host:alpha",
+        "audience": "viewer:beta",
+        "purpose": "remote_assistance",
+        "direction": "host_to_viewer",
+        "operation_id": "fixture:clarification:screen-frame-01",
+        "approved_operation_fingerprint": "synthetic-only-not-cryptographic:screen-frame-01",
+        "requested_operation_fingerprint": "synthetic-only-not-cryptographic:screen-plus-clipboard",
+        "session_fingerprint": "synthetic-session:alpha",
+        "authority_epoch": 12
+      },
+      "consent": "screen_only",
+      "authority": "screen_only",
+      "route": "m1.clipboard.read.disclosure.v1",
+      "mutation": "cross_lane_scope_expansion",
+      "expected_binding_semantics": "A clarification narrows ambiguity; it does not create ambient authority for adjacent lanes."
+    }
+  ],
+  "pairing_contract": {
+    "M1-CL-01/M1-CL-02": "Same principal, delegate, host and broad purpose context; only the specificity and explicit approval change.",
+    "M1-CL-02/M1-CL-04": "Same clarified approval and friendly operation identity; the latter changes the requested lane set and operation fingerprint.",
+    "M1-CL-03": "Positive control for avoiding unnecessary clarification when all material operation fields and exact approval are already present."
+  }
+}

@@ -1,0 +1,396 @@
+{
+  "schema_id": "org.luminousdynamics.xenia.m1-authorization-assurance-oracle",
+  "schema_version": "0.1.0",
+  "status": "preregistration_oracle_not_independently_adjudicated",
+  "input_corpus": "M1_AUTHORIZATION_ASSURANCE_CORPUS_V0_1.json",
+  "input_corpus_source_commit": "e0525f224597ea2c8373ab43f868b9d6452ff858",
+  "independent_from_candidate_implementation": true,
+  "independent_adjudication_status": "pending",
+  "disposition": [
+    "PERMIT",
+    "DENY",
+    "HOLD"
+  ],
+  "task_outcome": [
+    "COMPLETE",
+    "BLOCKED",
+    "FAILED",
+    "PARTIAL",
+    "INDETERMINATE"
+  ],
+  "local_effect_state": [
+    "NOT_ATTEMPTED",
+    "LOCAL_EFFECT_APPLIED",
+    "LOCAL_SEND_RETURNED",
+    "LOCAL_STAGED",
+    "RECEIVER_VERIFIED",
+    "PARTIAL",
+    "UNKNOWN"
+  ],
+  "remote_observation_state": [
+    "NOT_OBSERVED",
+    "NOT_PROVEN",
+    "OBSERVED",
+    "UNKNOWN",
+    "NOT_APPLICABLE"
+  ],
+  "reconciliation_state": [
+    "KNOWN",
+    "NOT_ATTEMPTED",
+    "REQUIRED"
+  ],
+  "scenario_results": [
+    {
+      "id": "M1-P01",
+      "authorization_disposition": "PERMIT",
+      "task_outcome": "COMPLETE",
+      "local_effect_state": "LOCAL_SEND_RETURNED",
+      "remote_observation_state": "NOT_PROVEN",
+      "reconciliation_state": "KNOWN",
+      "expected_new_effect_attempts": 1,
+      "replay_state": "NONE",
+      "rationale": "The source and local transport path completed; viewer receipt/render/playback or human observation is not inferred."
+    },
+    {
+      "id": "M1-P02",
+      "authorization_disposition": "PERMIT",
+      "task_outcome": "COMPLETE",
+      "local_effect_state": "LOCAL_SEND_RETURNED",
+      "remote_observation_state": "NOT_PROVEN",
+      "reconciliation_state": "KNOWN",
+      "expected_new_effect_attempts": 1,
+      "replay_state": "NONE",
+      "rationale": "The source and local transport path completed; viewer receipt/render/playback or human observation is not inferred."
+    },
+    {
+      "id": "M1-P03",
+      "authorization_disposition": "PERMIT",
+      "task_outcome": "COMPLETE",
+      "local_effect_state": "LOCAL_SEND_RETURNED",
+      "remote_observation_state": "NOT_PROVEN",
+      "reconciliation_state": "KNOWN",
+      "expected_new_effect_attempts": 1,
+      "replay_state": "NONE",
+      "rationale": "The source and local transport path completed; viewer receipt/render/playback or human observation is not inferred."
+    },
+    {
+      "id": "M1-P04",
+      "authorization_disposition": "PERMIT",
+      "task_outcome": "COMPLETE",
+      "local_effect_state": "LOCAL_EFFECT_APPLIED",
+      "remote_observation_state": "NOT_PROVEN",
+      "reconciliation_state": "KNOWN",
+      "expected_new_effect_attempts": 1,
+      "replay_state": "NONE",
+      "rationale": "Exact consent and authority match; local effect owner reports the bounded local result only."
+    },
+    {
+      "id": "M1-P05",
+      "authorization_disposition": "PERMIT",
+      "task_outcome": "COMPLETE",
+      "local_effect_state": "LOCAL_SEND_RETURNED",
+      "remote_observation_state": "NOT_PROVEN",
+      "reconciliation_state": "KNOWN",
+      "expected_new_effect_attempts": 1,
+      "replay_state": "NONE",
+      "rationale": "The source and local transport path completed; viewer receipt/render/playback or human observation is not inferred."
+    },
+    {
+      "id": "M1-P06",
+      "authorization_disposition": "PERMIT",
+      "task_outcome": "COMPLETE",
+      "local_effect_state": "LOCAL_EFFECT_APPLIED",
+      "remote_observation_state": "NOT_PROVEN",
+      "reconciliation_state": "KNOWN",
+      "expected_new_effect_attempts": 1,
+      "replay_state": "NONE",
+      "rationale": "Exact consent and authority match; local effect owner reports the bounded local result only."
+    },
+    {
+      "id": "M1-P07",
+      "authorization_disposition": "PERMIT",
+      "task_outcome": "COMPLETE",
+      "local_effect_state": "LOCAL_SEND_RETURNED",
+      "remote_observation_state": "NOT_PROVEN",
+      "reconciliation_state": "KNOWN",
+      "expected_new_effect_attempts": 1,
+      "replay_state": "NONE",
+      "rationale": "The source and local transport path completed; viewer receipt/render/playback or human observation is not inferred."
+    },
+    {
+      "id": "M1-P08",
+      "authorization_disposition": "PERMIT",
+      "task_outcome": "COMPLETE",
+      "local_effect_state": "LOCAL_EFFECT_APPLIED",
+      "remote_observation_state": "NOT_APPLICABLE",
+      "reconciliation_state": "KNOWN",
+      "expected_new_effect_attempts": 1,
+      "replay_state": "NONE",
+      "rationale": "The receiver's local verified publication completed; independent filesystem observation remains outside this fixture."
+    },
+    {
+      "id": "M1-D01",
+      "authorization_disposition": "DENY",
+      "task_outcome": "BLOCKED",
+      "local_effect_state": "NOT_ATTEMPTED",
+      "remote_observation_state": "NOT_OBSERVED",
+      "reconciliation_state": "NOT_ATTEMPTED",
+      "expected_new_effect_attempts": 0,
+      "replay_state": "NONE",
+      "rationale": "A named scope, direction, resource, purpose/audience, validity, or consent precondition is violated."
+    },
+    {
+      "id": "M1-D02",
+      "authorization_disposition": "DENY",
+      "task_outcome": "BLOCKED",
+      "local_effect_state": "NOT_ATTEMPTED",
+      "remote_observation_state": "NOT_OBSERVED",
+      "reconciliation_state": "NOT_ATTEMPTED",
+      "expected_new_effect_attempts": 0,
+      "replay_state": "NONE",
+      "rationale": "A named scope, direction, resource, purpose/audience, validity, or consent precondition is violated."
+    },
+    {
+      "id": "M1-D03",
+      "authorization_disposition": "DENY",
+      "task_outcome": "BLOCKED",
+      "local_effect_state": "NOT_ATTEMPTED",
+      "remote_observation_state": "NOT_OBSERVED",
+      "reconciliation_state": "NOT_ATTEMPTED",
+      "expected_new_effect_attempts": 0,
+      "replay_state": "NONE",
+      "rationale": "A named scope, direction, resource, purpose/audience, validity, or consent precondition is violated."
+    },
+    {
+      "id": "M1-D04",
+      "authorization_disposition": "DENY",
+      "task_outcome": "BLOCKED",
+      "local_effect_state": "NOT_ATTEMPTED",
+      "remote_observation_state": "NOT_OBSERVED",
+      "reconciliation_state": "NOT_ATTEMPTED",
+      "expected_new_effect_attempts": 0,
+      "replay_state": "NONE",
+      "rationale": "A named scope, direction, resource, purpose/audience, validity, or consent precondition is violated."
+    },
+    {
+      "id": "M1-D05",
+      "authorization_disposition": "DENY",
+      "task_outcome": "BLOCKED",
+      "local_effect_state": "NOT_ATTEMPTED",
+      "remote_observation_state": "NOT_OBSERVED",
+      "reconciliation_state": "NOT_ATTEMPTED",
+      "expected_new_effect_attempts": 0,
+      "replay_state": "NONE",
+      "rationale": "A named scope, direction, resource, purpose/audience, validity, or consent precondition is violated."
+    },
+    {
+      "id": "M1-D06",
+      "authorization_disposition": "DENY",
+      "task_outcome": "BLOCKED",
+      "local_effect_state": "NOT_ATTEMPTED",
+      "remote_observation_state": "NOT_OBSERVED",
+      "reconciliation_state": "NOT_ATTEMPTED",
+      "expected_new_effect_attempts": 0,
+      "replay_state": "NONE",
+      "rationale": "A named scope, direction, resource, purpose/audience, validity, or consent precondition is violated."
+    },
+    {
+      "id": "M1-D07",
+      "authorization_disposition": "DENY",
+      "task_outcome": "BLOCKED",
+      "local_effect_state": "NOT_ATTEMPTED",
+      "remote_observation_state": "NOT_OBSERVED",
+      "reconciliation_state": "NOT_ATTEMPTED",
+      "expected_new_effect_attempts": 0,
+      "replay_state": "NONE",
+      "rationale": "A named scope, direction, resource, purpose/audience, validity, or consent precondition is violated."
+    },
+    {
+      "id": "M1-D08",
+      "authorization_disposition": "DENY",
+      "task_outcome": "BLOCKED",
+      "local_effect_state": "NOT_ATTEMPTED",
+      "remote_observation_state": "NOT_OBSERVED",
+      "reconciliation_state": "NOT_ATTEMPTED",
+      "expected_new_effect_attempts": 0,
+      "replay_state": "NONE",
+      "rationale": "A named scope, direction, resource, purpose/audience, validity, or consent precondition is violated."
+    },
+    {
+      "id": "M1-R01",
+      "authorization_disposition": "DENY",
+      "task_outcome": "BLOCKED",
+      "local_effect_state": "NOT_ATTEMPTED",
+      "remote_observation_state": "NOT_OBSERVED",
+      "reconciliation_state": "NOT_ATTEMPTED",
+      "expected_new_effect_attempts": 0,
+      "replay_state": "NONE",
+      "rationale": "Known revoked, stale-session, locally latched, or non-attenuating authority is denied."
+    },
+    {
+      "id": "M1-R02",
+      "authorization_disposition": "HOLD",
+      "task_outcome": "INDETERMINATE",
+      "local_effect_state": "NOT_ATTEMPTED",
+      "remote_observation_state": "NOT_OBSERVED",
+      "reconciliation_state": "REQUIRED",
+      "expected_new_effect_attempts": 0,
+      "replay_state": "NONE",
+      "rationale": "Authority or route currentness cannot be established; no mutation is attempted until reconciled."
+    },
+    {
+      "id": "M1-R03",
+      "authorization_disposition": "HOLD",
+      "task_outcome": "INDETERMINATE",
+      "local_effect_state": "NOT_ATTEMPTED",
+      "remote_observation_state": "NOT_OBSERVED",
+      "reconciliation_state": "REQUIRED",
+      "expected_new_effect_attempts": 0,
+      "replay_state": "NONE",
+      "rationale": "Authority or route currentness cannot be established; no mutation is attempted until reconciled."
+    },
+    {
+      "id": "M1-R04",
+      "authorization_disposition": "HOLD",
+      "task_outcome": "INDETERMINATE",
+      "local_effect_state": "NOT_ATTEMPTED",
+      "remote_observation_state": "NOT_OBSERVED",
+      "reconciliation_state": "REQUIRED",
+      "expected_new_effect_attempts": 0,
+      "replay_state": "NONE",
+      "rationale": "Authority or route currentness cannot be established; no mutation is attempted until reconciled."
+    },
+    {
+      "id": "M1-R05",
+      "authorization_disposition": "DENY",
+      "task_outcome": "BLOCKED",
+      "local_effect_state": "NOT_ATTEMPTED",
+      "remote_observation_state": "NOT_OBSERVED",
+      "reconciliation_state": "NOT_ATTEMPTED",
+      "expected_new_effect_attempts": 0,
+      "replay_state": "NONE",
+      "rationale": "Known revoked, stale-session, locally latched, or non-attenuating authority is denied."
+    },
+    {
+      "id": "M1-R06",
+      "authorization_disposition": "HOLD",
+      "task_outcome": "INDETERMINATE",
+      "local_effect_state": "NOT_ATTEMPTED",
+      "remote_observation_state": "NOT_OBSERVED",
+      "reconciliation_state": "REQUIRED",
+      "expected_new_effect_attempts": 0,
+      "replay_state": "NONE",
+      "rationale": "Authority or route currentness cannot be established; no mutation is attempted until reconciled."
+    },
+    {
+      "id": "M1-R07",
+      "authorization_disposition": "DENY",
+      "task_outcome": "BLOCKED",
+      "local_effect_state": "NOT_ATTEMPTED",
+      "remote_observation_state": "NOT_OBSERVED",
+      "reconciliation_state": "NOT_ATTEMPTED",
+      "expected_new_effect_attempts": 0,
+      "replay_state": "NONE",
+      "rationale": "Known revoked, stale-session, locally latched, or non-attenuating authority is denied."
+    },
+    {
+      "id": "M1-R08",
+      "authorization_disposition": "DENY",
+      "task_outcome": "BLOCKED",
+      "local_effect_state": "NOT_ATTEMPTED",
+      "remote_observation_state": "NOT_OBSERVED",
+      "reconciliation_state": "NOT_ATTEMPTED",
+      "expected_new_effect_attempts": 0,
+      "replay_state": "NONE",
+      "rationale": "Known revoked, stale-session, locally latched, or non-attenuating authority is denied."
+    },
+    {
+      "id": "M1-E01",
+      "authorization_disposition": "PERMIT",
+      "task_outcome": "INDETERMINATE",
+      "local_effect_state": "UNKNOWN",
+      "remote_observation_state": "UNKNOWN",
+      "reconciliation_state": "REQUIRED",
+      "expected_new_effect_attempts": 1,
+      "replay_state": "NONE",
+      "rationale": "The authorized injector call was attempted but returned an error; the error alone does not prove that no platform effect occurred."
+    },
+    {
+      "id": "M1-E02",
+      "authorization_disposition": "PERMIT",
+      "task_outcome": "INDETERMINATE",
+      "local_effect_state": "UNKNOWN",
+      "remote_observation_state": "UNKNOWN",
+      "reconciliation_state": "REQUIRED",
+      "expected_new_effect_attempts": 1,
+      "replay_state": "NONE",
+      "rationale": "Authorization was valid and dispatch occurred; a lost acknowledgement is not evidence of no effect."
+    },
+    {
+      "id": "M1-E03",
+      "authorization_disposition": "PERMIT",
+      "task_outcome": "FAILED",
+      "local_effect_state": "LOCAL_STAGED",
+      "remote_observation_state": "NOT_APPLICABLE",
+      "reconciliation_state": "KNOWN",
+      "expected_new_effect_attempts": 1,
+      "replay_state": "NONE",
+      "rationale": "Authorization is valid, but content-integrity verification fails before final publication."
+    },
+    {
+      "id": "M1-E04",
+      "authorization_disposition": "PERMIT",
+      "task_outcome": "INDETERMINATE",
+      "local_effect_state": "LOCAL_STAGED",
+      "remote_observation_state": "NOT_APPLICABLE",
+      "reconciliation_state": "REQUIRED",
+      "expected_new_effect_attempts": 1,
+      "replay_state": "NONE",
+      "rationale": "Staging completed but final publication returned an error; destination state must be reconciled."
+    },
+    {
+      "id": "M1-E05",
+      "authorization_disposition": "PERMIT",
+      "task_outcome": "PARTIAL",
+      "local_effect_state": "PARTIAL",
+      "remote_observation_state": "UNKNOWN",
+      "reconciliation_state": "REQUIRED",
+      "expected_new_effect_attempts": 1,
+      "replay_state": "NONE",
+      "rationale": "A prefix of the transfer was dispatched/verified; the suffix is not known complete."
+    },
+    {
+      "id": "M1-E06",
+      "authorization_disposition": "PERMIT",
+      "task_outcome": "COMPLETE",
+      "local_effect_state": "LOCAL_EFFECT_APPLIED",
+      "remote_observation_state": "NOT_PROVEN",
+      "reconciliation_state": "KNOWN",
+      "expected_new_effect_attempts": 0,
+      "replay_state": "RESOLVED_PRIOR_RESULT",
+      "rationale": "The exact operation ID and fingerprint resolve to the prior committed outcome; no second effect-bearing dispatch occurs."
+    },
+    {
+      "id": "M1-E07",
+      "authorization_disposition": "DENY",
+      "task_outcome": "BLOCKED",
+      "local_effect_state": "NOT_ATTEMPTED",
+      "remote_observation_state": "NOT_OBSERVED",
+      "reconciliation_state": "NOT_ATTEMPTED",
+      "expected_new_effect_attempts": 0,
+      "replay_state": "CONFLICT",
+      "rationale": "The operation identity is reused with a different immutable fingerprint; this is a conflict, not an idempotent retry."
+    },
+    {
+      "id": "M1-E08",
+      "authorization_disposition": "HOLD",
+      "task_outcome": "INDETERMINATE",
+      "local_effect_state": "UNKNOWN",
+      "remote_observation_state": "UNKNOWN",
+      "reconciliation_state": "REQUIRED",
+      "expected_new_effect_attempts": 0,
+      "replay_state": "HELD_FOR_RECONCILIATION",
+      "rationale": "A prior dispatch has an unknown outcome and no qualified idempotency contract; a new effect-bearing retry is held."
+    }
+  ]
+}

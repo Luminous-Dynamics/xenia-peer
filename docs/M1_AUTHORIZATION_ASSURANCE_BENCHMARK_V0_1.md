@@ -2,7 +2,10 @@
 
 **Status:** preregistration proposal; no comparative measurements have been produced.
 **Owner:** Xenia #505, composed with Mycelix LISE #6136, #6213, #6236, #6140, #6170, #6189 and #6193.
-**Candidate implementation:** Xenia M1 lanes in PR #509. Current route manifest is explicitly incomplete; see `M1_ROUTE_MEDIATION_INVENTORY_V0_1.json`.
+**Candidate implementation:** Xenia M1 lanes in PR #509. Current route manifest is explicitly incomplete; see `M1_ROUTE_MEDIATION_INVENTORY_V0_1.json`.  
+**Input corpus:** `docs/benchmarks/M1_AUTHORIZATION_ASSURANCE_CORPUS_V0_1.json` (32 synthetic scenario inputs, without embedded expected outcomes).  
+**Reference oracle:** `docs/benchmarks/M1_AUTHORIZATION_ASSURANCE_ORACLE_V0_1.json` (separate expected outcomes; authored separately from candidate code, pending independent adjudication).  
+**Structural test:** `apps/xenia-peer/tests/m1_authorization_assurance_corpus.rs` (checks input/oracle one-to-one linkage, schema consistency, adversarial action/direction mutations and stage-separated outcome semantics; it does not execute the candidate or independently adjudicate the oracle).
 
 ## 1. Research objective
 
@@ -35,6 +38,7 @@ unknown outcome != no effect
 4. **Zanzibar-style reference arm** for causal authorization-change semantics. This is a comparator design, not Google's production Zanzibar. The original Zanzibar paper reports trillions of ACLs, millions of authorization requests per second, p95 latency below 10 ms and availability above 99.999% over three years of production at Google. These are paper-reported deployment metrics, not a directly reproducible target for this prototype. See [USENIX ATC 2019](https://www.usenix.org/conference/atc19/presentation/pang).
 5. **Xenia local M1 policy arm** with local consent and exact lane checks, measured both with and without the optional Mycelix adapter when that adapter exists.
 6. **No-enforcement negative control** only in a disposable deterministic sandbox, to prove the oracle detects out-of-scope effects. Never expose this arm to a real host or production resource.
+7. **APort Vault** as a direct-effect payment-authorization comparator, using only a license- and semantics-reviewed subset. It tests whether deterministic pre-action authorization blocks recipient/amount violations while retaining valid payment execution. Payment-recipient rates are not directly comparable to Xenia's media, input or file-transfer effects. See [APort Vault](https://arxiv.org/abs/2609.22076).
 
 ### Frozen workload
 
@@ -126,7 +130,7 @@ Bind each event to operation ID, monotonic session sequence, lane/action, direct
 
 ### Adversarial scenario panel
 
-Start with at least 64 deterministic known-answer scenarios, then expand to at least 128 development cases and a sealed, independently adjudicated holdout. Include:
+The checked-in v0.1 corpus is a **32-case structural seed**, with eight cases per family. It is not yet the full known-answer panel. Expand to at least 64 independently adjudicated deterministic known-answer scenarios before claiming a frozen benchmark run, then expand to at least 128 development cases plus a sealed holdout. Include:
 - each lane granted alone; every unrelated lane remains denied;
 - screen permission cannot read clipboard, inject input, or send/receive files;
 - clipboard read/write and file send/receive are directionally independent;
@@ -146,7 +150,11 @@ Start with at least 64 deterministic known-answer scenarios, then expand to at l
 - ambiguous user intent requiring principal clarification before action;
 - valid positive controls for unrelated independent grants after a scoped revoke.
 
-Each case must freeze the exact action, lane, direction, resource, purpose, audience, expected consent, currentness evidence, parent chain, session epoch, effect boundary, fault schedule and expected effect state. Keep the oracle independent from the candidate route manifest and enforcement code.
+Each case must freeze the exact action, lane, direction, resource, purpose, audience, expected consent, currentness evidence, parent chain, session epoch, effect boundary, fault schedule and expected effect state. Keep expected results in the separate oracle file, independent of the candidate route manifest and enforcement code. Independent evaluator adjudication remains pending.
+
+The 32-case v0.1 seed covers all eight lanes and has four equal-size families: positive controls; scope/consent negatives; freshness/propagation controls; and effect/outcome controls. Inputs and expected outcomes are stored separately. The Rust structural test checks unique IDs, one-to-one input/oracle coverage, family balance, required operation bindings, and explicit preservation of deliberately mismatched action/direction negative controls. It also checks that downstream injector/transport/filesystem failures do not rewrite a valid authorization result, that exact duplicate operation IDs/fingerprints resolve to the prior result without a second dispatch, and that changed-fingerprint reuse conflicts.
+
+The oracle remains a separately authored reference, not an independently adjudicated truth source. In particular, the seed deliberately distinguishes: a valid authorization followed by an effect failure/unknown outcome; an idempotent exact replay that returns the prior result; a changed-fingerprint conflict; and an unknown prior outcome that holds a new retry. These are preregistration semantics, not measured runtime outcomes.
 
 ### Metrics and non-compensatory gates
 
@@ -178,13 +186,109 @@ These are not measured results. For distributed/effect-boundary runs, report coo
 Two 2026 benchmark papers reinforce why authorization and side-effect safety must be separate from task success:
 
 - **AuthorizationBench**: 286 tasks across ten application domains and 6,864 trajectories; reports 19.2% out-of-authorization trajectories in its evaluated models/harnesses, with configurations from 10.5% to 26.6%. It also reports lower out-of-authorization rates in runs that consulted the principal (14.0%) than runs that did not (21.6%). These are study-specific results, not Xenia baselines. [Paper](https://arxiv.org/abs/2610.27548).
-- **SABench**: 201 email/calendar/ticket tasks and 2,211 model-task runs; reports 15.2% collateral-damage runs and 12.8% unauthorized writes among goal-satisfied runs. Its trace oracle scores task success and authorization compliance independently. [Paper](https://arxiv.org/abs/2610.34167).
+- **SABench**: 201 email/calendar/ticket tasks and 2,211 model-task runs across 11 frontier models; reports 15.2% collateral-damage runs and 12.8% unauthorized writes among goal-satisfied runs. Ambiguity traps produced 38.8% collateral-damage violations versus 8.4% for non-ambiguous traps; dependent and cross-tool state structures had roughly twice the collateral damage of independent state. Its deterministic trace oracle scores task success and authorization compliance independently. These figures motivate paired ambiguity/dependency/cross-tool controls, but are study-specific and not Xenia measurements. [Paper](https://arxiv.org/abs/2610.34167).
+- **APort Vault**: a direct-effect payment authorization benchmark with human-authored attack traces and a deterministic pre-action authorization layer. It is useful for recipient/amount control and preserving valid transactions, but its payment-specific outcome rates must not be compared directly with M1 screen, audio, clipboard, input or file actions. [Paper](https://arxiv.org/abs/2609.22076).
 
 Use these as design comparators: leave out-of-scope routes executable and observable in a deterministic sandbox, and score task success, authorized effect, unauthorized side effects and evidence confidence as separate axes. Do not compare their headline percentages directly with M1 runtime tests or with policy-engine microbenchmarks.
+
+## 4.1 Authorization drift and three-layer approval preservation
+
+Two newer research directions should be represented in the next M1 benchmark expansion. They are design comparators, not score-equivalent M1 results.
+
+### Authorization drift across four dimensions
+
+The Authorization Drift Benchmark (ADB, arXiv:2611.09113, 6 November 2026) defines drift across:
+- **Data:** reading or disclosing more than the task requires.
+- **Tool:** choosing a more powerful or unapproved route when a compliant route exists.
+- **Scope:** widening the object, recipient, quantity, direction or effect beyond the approved request.
+- **Time:** acting after the approved window, after revocation, or under a stale session/authority epoch.
+
+ADB contains 648 samples across seven domains and reports 25,207 trajectories across 13 models and three frameworks. The paper reports drift rates of 0.43–0.61 for frontier-capable models in its tested configurations, while 86.18% of tasks had an observed clean-success trajectory. These are study-specific results, not Xenia baselines. See [Authorization Drift in LLM Agents](https://arxiv.org/abs/2611.09113).
+
+M1 translation: each of the eight lanes should have paired cases in which a legitimate, least-privilege path exists alongside an attractive overbroad alternative. Examples include screen-view permission followed by a clipboard read, file-send via a different resource, input injection to a different target, and a queued transfer after the session expires. The oracle should identify the earliest drift point and the resulting protected effect, not only the final task state.
+
+### Refusal safety AND bounded authorization completeness
+
+The 14 November 2026 study *Auditable Authorization for LLM Agents: Empirical Evidence Across Model, Harness, and Workflow Layers* proposes two independent obligations:
+- **Refusal safety:** a rejected or withdrawn effect must not occur.
+- **Bounded authorization completeness:** every still-authorized, feasible, in-scope action must complete within its declared horizon, unless its conditions become invalid or require renewed consent.
+
+The paper distinguishes three places where approval can be lost:
+1. **Model layer:** the model fails to generate an already-approved action or reintroduces a rejected one.
+2. **Harness layer:** parallel approval aggregation, queue scheduling, pause/resume, restoration or retries lose or revive pending work.
+3. **Workflow layer:** a router or branch records Reject but still reaches the protected effect, or records Approve without dispatching the approved action.
+
+The central lesson is symmetric: an approval is not effective unless the permitted action survives all three layers, and a rejection is not effective unless every route to its protected effect is suppressed. The benchmark must therefore expose the earliest divergence (intent → generated operation → dispatch → local effect → observed state), not collapse all failures into a single deny/allow score.
+
+Its experiments report 7 unfinished approvals among 300 paired approvals despite zero denied effects in that paired panel; parallel confirmation loses an approved branch in three tasks per model; a CrewAI restoration path omitted 336/672 approved effects; and 4 of 59 comparable public n8n workflows executed after Reject. These results are specific to the paper's models, workflow versions, harnesses and denominators; they are not measurements of Xenia. See [Auditable Authorization for LLM Agents](https://arxiv.org/abs/2611.19237).
+
+M1 translation: paired tests must hold the same session, operation and host state fixed while changing only the authorization decision. An Approve must preserve the exact eligible lane operation through transport scheduling and effect dispatch. A Revoke/Deny must suppress the exact same operation. Do not mark a blanket shutdown as a successful authorization result; valid unrelated lanes and independent grants must remain usable.
+
+### Remaining M1 benchmark additions (beyond the current 32-case and 12-history seeds)
+
+The 12-history effect-race extension below now covers revoke/commit order, timeout-after-dispatch, exact replay, changed-fingerprint conflict, stale rekey, ancestor revocation, staged-file publication, sensitive-buffer invalidation and concurrent one-shot consumption. Additional paired, independently adjudicated cases are still needed for:
+- each lane's minimum compliant route versus an over-collection, overbroad-tool, wrong-resource or post-expiry shortcut;
+- a scoped Approve with two authorized operations, where parallel scheduling or reconnect must not drop one;
+- Approve for one lane and Deny for another, where batching must not collapse both decisions into one boolean;
+- session restoration after restart where a previously approved but uncommitted action must be re-evaluated against current consent and authority;
+- a Reject whose control-plane record is correct but an alternate workflow/transport still attempts the protected effect;
+- a valid Approve where the action is feasible but the harness never dispatches it.
+
+Score refusal safety, bounded authorization completeness, task success, collateral/over-collection, exact operation identity, unknown/partial outcome handling, and time-to-completion separately. No weighted score may let successful refusals compensate for dropped approved work, or let completed work compensate for unauthorized effects.
+
+For Xenia specifically, use the model/harness/workflow distinction to review:
+- model/agent-generated input, clipboard and file actions (if an agent controls Xenia);
+- daemon task scheduling, concurrent file-transfer tasks, reconnect/rekey and cancellation;
+- TCP/WebSocket/QUIC dispatch, operator/control routes and the final OS/filesystem/input effect owners.
+
+The 32-case decision corpus, 16-case drift/refusal-completeness extension, four-case clarification extension, seven-case AuthZEN obligations extension and 12-history effect-race extension are separate synthetic structural seeds. Each uses a separate outcome oracle. None is an independently adjudicated benchmark result; executable candidate controls, full route/effect interposition and independent observation remain pending.
+
+## 4.2 Effect-race and linearization history extension
+
+A separate 12-history schedule corpus has been added:
+- `docs/benchmarks/M1_EFFECT_RACE_HISTORY_EXTENSION_V0_1.json`
+- `docs/benchmarks/M1_EFFECT_RACE_HISTORY_EXTENSION_V0_1_ORACLE.json`
+
+It covers:
+1. Revocation observed before the effect-owner commit gate → no dispatch.
+2. Local effect commit linearizes before later revocation → preserve the commit while keeping missing remote acknowledgement UNKNOWN.
+3. A screen source read occurs before revocation but the final send gate occurs after it → invalidate the captured buffer and do not disclose.
+4. Transport timeout after dispatch → UNKNOWN and no blind retry.
+5. Exact operation ID + fingerprint replay → return/reconcile the prior result without a second dispatch.
+6. Reused operation ID with changed immutable fingerprint → CONFLICT.
+7. Old queued work after reconnect/rekey → reject the stale session epoch.
+8. Parent/ancestor revocation observed before cached descendant effect → deny descendant.
+9. Incoming file chunks staged before revocation but publication attempted afterwards → quarantine/remove staging and do not publish.
+10. Host clipboard read before revocation but send gate after → invalidate plaintext buffer and do not disclose.
+11. Two enforcement points concurrently consume a one-shot capability → at most one durable consume and effect-bearing dispatch.
+12. A valid operator Revoke followed by a send-loop error still runs the revocation finalizer before propagating the original error; the appended M1 session Chain event is in-memory evidence, not proof of durable session export.
+
+The input corpus records ordered logical events, not wall-clock timestamps. Its separate oracle distinguishes local commit from remote observation and represents ambiguous transport results as UNKNOWN. It does not implement a linearizable commit service or prove the current runtime has one. A Rust structural test validates action IDs, input/oracle one-to-one linkage, ordered event sequences, and the expected history invariants. The test is a corpus-drift guard, not an implementation or independent adjudication.
+
+**Claim ceiling:** synthetic preregistration histories only. Xenia #504 must still implement/qualify the effect-owner serialization or equivalent transactional protocol; Mycelix #6193 owns independent linearizability/history checking. A final permission check followed by an asynchronous OS/network operation is not automatically atomic with revocation.
 
 ## 5. Interoperability and standards
 
 Use OpenID AuthZEN Authorization API 1.0 as the PDP↔PEP interoperability boundary rather than inventing a competing policy query protocol. Treat the AuthZEN Obligations Profile 1.0 as a version-pinned Working Group Draft, not a final standard. If negotiated, a PEP that cannot execute a mandatory obligation must deny; transport/authority uncertainty remains a separate local HOLD/INDETERMINATE condition.
+
+### AuthZEN obligation semantics are not the agent dual-obligation score
+
+The AuthZEN Obligations Profile 1.0 Draft 1 (published 3 July 2026) defines mandatory machine-readable PEP actions. It is **not** the same concept as the agent-benchmark distinction between refusal safety and bounded authorization completeness.
+
+For a single decision request:
+- Obligations may accompany PERMIT or DENY; all returned obligations are mandatory.
+- A PERMIT may be honored only when every obligation is executed successfully.
+- If an obligation is unknown, unsupported, malformed, or fails execution, the PEP treats the overall response as DENY.
+- The PEP still executes every other obligation it understands and can execute, including accountability/notification actions.
+- A DENY remains DENY, while its supported obligations are still executed.
+- For Search-shaped requests only, a result with an unexecutable obligation is excluded while other compliant results may still be returned. This is not the direct M1 lane-decision flow.
+
+A separate seven-case input corpus and outcome oracle now capture these semantics:
+- `docs/benchmarks/M1_AUTHZEN_OBLIGATIONS_PROFILE_DRAFT1_CORPUS_V0_1.json`
+- `docs/benchmarks/M1_AUTHZEN_OBLIGATIONS_PROFILE_DRAFT1_ORACLE_V0_1.json`
+
+The structural Rust test validates the input/oracle linkage and the expected decision/filter distinctions. It does not send live AuthZEN requests, execute obligations, test a deployed PEP/PDP pair, or establish certification/conformance. Keep this profile optional and version-pinned while it remains a Working Group Draft.
+
 
 References:
 - [OpenID AuthZEN specifications](https://openid.net/wg/authzen/specifications/)
@@ -224,3 +328,93 @@ Do not aggregate into a universal “authorization assurance score.” Publish s
 - Mycelix #6136/#6213/#6140/#6170/#6189/#6193: exact effectuation, route completeness, evidence provenance, agent authorization, one-shot effect interposition and concurrency/failure semantics.
 
 This profile composes those owners. It does not create a parallel authority, policy, route-inventory, event or revocation service.
+
+
+## 4.2 M1 authorization-drift and dual-obligation extension
+
+The branch now contains a separate 16-case synthetic extension and oracle:
+- `docs/benchmarks/M1_AUTHORIZATION_DRIFT_DUAL_OBLIGATION_EXTENSION_V0_1.json`
+- `docs/benchmarks/M1_AUTHORIZATION_DRIFT_DUAL_OBLIGATION_ORACLE_V0_1.json`
+
+Seven paired families reuse the same logical operation identity and frozen upstream-state fingerprint while varying only the named mutation:
+- data minimization vs clipboard over-collection;
+- declared file-transfer tool vs unenumerated alternate helper;
+- exact resource vs changed host/file resource;
+- current session vs stale queued session epoch;
+- REJECT vs APPROVE for the exact same input operation;
+- all parallel approved branches preserved vs one branch dropped during restoration;
+- workflow REJECT enforced vs a background route attempting the rejected clipboard operation.
+
+The extension also includes approval followed by revocation before commit, and restoration after restart when current authority/consent/session evidence is unavailable.
+
+Two independent obligations are scored:
+1. **Refusal safety:** rejected or effectively revoked work creates no protected effect across any reachable route.
+2. **Bounded authorization completeness:** every still-authorized and feasible operation reaches its named effect owner within the authorized horizon, unless its conditions change or require renewed consent.
+
+The oracle distinguishes a valid authorization whose harness drops an approved branch from an authorization denial. The former is a completeness failure, not a successful refusal. Likewise, it expects a Reject to suppress alternate-route effects; any observed protected effect is a refusal-safety failure. Unknown route inventory and unknown post-restart authority remain HOLD/INDETERMINATE.
+
+These 16 cases are synthetic inputs and a separately stored reference oracle. The Rust test checks pair identity, one-to-one input/oracle IDs, and selected outcome invariants. It does not execute the daemon/harness, adjudicate the oracle independently, or claim that the current Xenia runtime exhibits any of the modeled failures.
+
+
+### Extension oracle semantics
+
+The extension oracle records the **correct expected behavior** for each input. It does not encode a deliberately faulty candidate as the expected result. For example:
+- the restored parallel-branch case expects both approved operations to complete; if only one completes, the measured candidate fails bounded authorization completeness;
+- the rejected-workflow case expects zero protected effects; if the background/alternate route changes clipboard state, the candidate fails refusal safety;
+- an unknown alternate route is HOLD/INDETERMINATE, not a complete-mediation pass;
+- a pending approval restored without current authority/consent evidence is HOLD until revalidated.
+
+The input and oracle are separate artifacts, and the Rust structural test checks their one-to-one identifiers and matched-pair identity. It is a schema/pairing check—not an execution oracle, independent adjudication, or evidence of runtime behavior.
+
+
+## 6. Principal clarification as a bounded authorization control
+
+The benchmark now has a separate four-case clarification extension:
+- `docs/benchmarks/M1_AUTHORIZATION_CLARIFICATION_EXTENSION_V0_1.json`
+- `docs/benchmarks/M1_AUTHORIZATION_CLARIFICATION_EXTENSION_V0_1_ORACLE.json`
+
+It is separate from the 32-case base seed and the 16-case drift/refusal-completeness extension. The four synthetic cases test:
+
+1. **Ambiguous intent:** "show them what they need" does not authorize an inferred set of screen, telemetry, audio, clipboard, file or input actions. The expected result is HOLD / clarification required, with zero source reads and zero effect attempts.
+2. **Bounded clarification:** once the principal specifies a single screen frame, exact host, viewer, purpose and direction, only `xenia.screen.view` becomes eligible. The unrelated clipboard/audio/input/file lanes remain unapproved.
+3. **No needless clarification:** a request that already specifies the exact file, host, recipient, purpose, direction and operation/byte bounds should proceed without asking the principal to repeat known fields.
+4. **Scope preservation:** the screen-only clarification cannot be reinterpreted as clipboard disclosure under the same friendly task ID; the added lane is denied before clipboard read.
+
+This is motivated by three recent, study-specific comparator families:
+
+- **AuthorizationBench** (20 October 2026) evaluated 286 tasks across ten domains and 6,864 trajectories. It reports 19.2% out-of-authorization trajectories in its evaluated configurations, and 14.0% versus 21.6% in controlled runs with versus without principal consultation. These are study/harness/model-specific results, not an M1 target. [Paper](https://arxiv.org/abs/2610.27548).
+- **SABench** (25 October 2026) evaluated 201 tasks and 2,211 model-task pairs. It reports collateral damage in 15.2% of runs, 12.8% unauthorized writes among goal-satisfied runs, and 38.8% versus 8.4% violations for ambiguous versus non-ambiguous traps. These motivate ambiguity and dependent-state controls, not a directly comparable Xenia result. [Paper](https://arxiv.org/abs/2610.34167).
+- **Authorization Drift Benchmark (ADB)** (6 November 2026) contains 648 samples across seven domains and 25,207 trajectories. It frames drift across data, tool, scope and time, and explicitly pairs a compliant path with an attractive unauthorized shortcut. [Paper](https://arxiv.org/abs/2611.09113).
+- **AuthGateBench** (12 October 2026) evaluates LLMs used as authorization gates on 1,400 policy-guided instances across five failure modes. Its paired design holds the action/trajectory constant while changing the request context so the correct label flips between allow and block. The paper reports unstable behavior across failure modes, including over-blocking explicitly authorized benign actions; this motivates a first-class false-denial / authorized-completion score, not merely refusal safety. [Paper](https://arxiv.org/abs/2610.16426).
+- **Auditable Authorization for LLM Agents** (14 November 2026) separates refusal safety from bounded authorization completeness across model selection, harness scheduling/restoration and workflow routing. Its preprint reports lost approved branches and workflow paths that executed after Reject in its specific test set. [Paper](https://arxiv.org/abs/2611.19237).
+
+### Scoring contract
+
+Report the following independently; do not create a composite score:
+
+- **Clarification precision:** fraction of genuinely underspecified cases correctly held before source access or effect.
+- **Clarification recall:** fraction of materially ambiguous operation fields detected.
+- **Unnecessary clarification rate:** explicit, fully bound positive controls interrupted despite sufficient authority context.
+- **Post-clarification scope integrity:** extra actions/resources/audiences/directions introduced after the user narrowed intent.
+- **Authorized completion:** exact clarified operations that reach their eligible effect owner within the declared horizon.
+- **Refusal safety:** denied or unapproved operations that never reach a protected effect.
+- **Authorized completion / false denial:** explicit, fully scoped and current permits that reach the effect owner; report eligible approved work dropped by the model, harness, restore path or workflow. Over-blocking is not a refusal-safety success.
+- **Effect evidence:** local attempt/commit, remote acknowledgement, independent observation and unknown reconciliation remain separate.
+
+A clarification may authorize only the fields the principal actually supplied. It does not infer neighboring lanes, grant a broader audience, extend an expiry, or approve a different operation fingerprint. A new effect outside the clarified scope requires a new authorization decision. Conversely, ambiguity in one proposed effect must not become an indiscriminate shutdown of unrelated, independently authorized operations.
+
+### Matched authorization-gate pair contract
+
+For any LLM-based or heuristic authorization-gate arm, include same-action / same-trajectory pairs with identical protected operation, principal, resource, environment and downstream effect witness. Change only the authoritative request scope or decision context so one case is permitted and the paired case is denied. Record the candidate's decision separately from whether it reached the real M1 PEP and whether the protected effect changed.
+
+This distinguishes:
+- false permit: a denied pair reaches the effect;
+- false deny: a permitted pair is suppressed despite all authority and effect preconditions being satisfied;
+- harness loss: a permitted action is approved but never dispatched;
+- bypass: the PEP denies but an alternate route still reaches the effect.
+
+The existing M1 dual-obligation REJECT/APPROVE pair is a seed for this contract. It is not yet an executable agent-gate comparison, and it does not establish model performance.
+
+### Claim ceiling
+
+The clarification extension is a four-case synthetic preregistration seed with a separate unadjudicated oracle. Its Rust test verifies schema, ID linkage and expected bounded semantics; it does not run a model, ask a real principal, enforce a live authorization, or establish field performance. The benchmark requires executable authorized and unauthorized routes plus independent effect witnesses before comparative claims.

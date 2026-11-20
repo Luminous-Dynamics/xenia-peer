@@ -72,6 +72,63 @@ pub enum M1Permission {
     ReceiveFileFromViewer,
 }
 
+/// Direction of information or control across an M1 host/viewer boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum M1DataDirection {
+    /// Host-originated information disclosed to the remote viewer.
+    HostToViewer,
+    /// Viewer-originated information or commands applied to the host.
+    ViewerToHost,
+}
+
+/// Stable delegated-action identity for each M1 permission.
+///
+/// These identifiers are an interoperability crosswalk for a future
+/// Mycelix/AuthZEN adapter. They do not grant authority by themselves:
+/// recipient consent, current semantic delegation, session state and the
+/// actual effect boundary remain separate required checks.
+impl M1Permission {
+    /// All independently controlled M1 permission lanes.
+    pub const ALL: [Self; 8] = [
+        Self::StreamFrame,
+        Self::StreamTelemetry,
+        Self::StreamAudio,
+        Self::InjectInput,
+        Self::ReadHostClipboard,
+        Self::WriteHostClipboard,
+        Self::SendFileToViewer,
+        Self::ReceiveFileFromViewer,
+    ];
+
+    /// Stable action identifier used when mapping M1 lanes to delegated authority.
+    pub const fn action_id(self) -> &'static str {
+        match self {
+            Self::StreamFrame => "xenia.screen.view",
+            Self::StreamTelemetry => "xenia.host.telemetry",
+            Self::StreamAudio => "xenia.audio.capture",
+            Self::InjectInput => "xenia.input.inject",
+            Self::ReadHostClipboard => "xenia.clipboard.read",
+            Self::WriteHostClipboard => "xenia.clipboard.write",
+            Self::SendFileToViewer => "xenia.file.send",
+            Self::ReceiveFileFromViewer => "xenia.file.receive",
+        }
+    }
+
+    /// Direction of the protected information/control flow.
+    pub const fn direction(self) -> M1DataDirection {
+        match self {
+            Self::StreamFrame
+            | Self::StreamTelemetry
+            | Self::StreamAudio
+            | Self::ReadHostClipboard
+            | Self::SendFileToViewer => M1DataDirection::HostToViewer,
+            Self::InjectInput | Self::WriteHostClipboard | Self::ReceiveFileFromViewer => {
+                M1DataDirection::ViewerToHost
+            }
+        }
+    }
+}
+
 /// The set of privileged operations a granted session actually authorizes.
 ///
 /// Consent is not a single boolean: a viewer may be allowed to see the
@@ -132,6 +189,79 @@ impl M1PermissionSet {
             M1Permission::SendFileToViewer => self.send_file_to_viewer,
             M1Permission::ReceiveFileFromViewer => self.receive_file_from_viewer,
         }
+    }
+
+    /// Whether every permission in this set is also present in `parent`.
+    ///
+    /// Use this to validate a proposed child/delegated permission set. It
+    /// rejects widening; it does not silently intersect or repair a request.
+    pub const fn is_subset_of(self, parent: Self) -> bool {
+        (!self.stream_frame || parent.stream_frame)
+            && (!self.stream_telemetry || parent.stream_telemetry)
+            && (!self.stream_audio || parent.stream_audio)
+            && (!self.inject_input || parent.inject_input)
+            && (!self.read_host_clipboard || parent.read_host_clipboard)
+            && (!self.write_host_clipboard || parent.write_host_clipboard)
+            && (!self.send_file_to_viewer || parent.send_file_to_viewer)
+            && (!self.receive_file_from_viewer || parent.receive_file_from_viewer)
+    }
+    /// Whether this set is a proper subset of the parent (no widening and at
+    /// least one permission removed).
+    ///
+    /// Use this when the delegation profile requires every child to narrow
+    /// its parent's lane set. is_subset_of remains useful for validating
+    /// effective, non-widening intersections.
+    pub fn is_strict_subset_of(self, parent: Self) -> bool {
+        self.is_subset_of(parent) && self != parent
+    }
+
+    /// Union the lanes of independent alternative grants.
+    ///
+    /// This is OR-composition, not a parent/child delegation operation.
+    /// Callers must preserve each grant's identity and revocation lineage;
+    /// this aggregate mask cannot explain which grant supports a lane.
+    pub const fn union_independent_grants(self, other: Self) -> Self {
+        Self {
+            stream_frame: self.stream_frame || other.stream_frame,
+            stream_telemetry: self.stream_telemetry || other.stream_telemetry,
+            stream_audio: self.stream_audio || other.stream_audio,
+            inject_input: self.inject_input || other.inject_input,
+            read_host_clipboard: self.read_host_clipboard || other.read_host_clipboard,
+            write_host_clipboard: self.write_host_clipboard || other.write_host_clipboard,
+            send_file_to_viewer: self.send_file_to_viewer || other.send_file_to_viewer,
+            receive_file_from_viewer: self.receive_file_from_viewer
+                || other.receive_file_from_viewer,
+        }
+    }
+
+    /// Permissions common to two independently required authority scopes.
+    ///
+    /// This is a set intersection, not an OR/union. Callers should retain the
+    /// source grants and their lineage separately for revocation accounting.
+    pub const fn intersection(self, other: Self) -> Self {
+        Self {
+            stream_frame: self.stream_frame && other.stream_frame,
+            stream_telemetry: self.stream_telemetry && other.stream_telemetry,
+            stream_audio: self.stream_audio && other.stream_audio,
+            inject_input: self.inject_input && other.inject_input,
+            read_host_clipboard: self.read_host_clipboard && other.read_host_clipboard,
+            write_host_clipboard: self.write_host_clipboard && other.write_host_clipboard,
+            send_file_to_viewer: self.send_file_to_viewer && other.send_file_to_viewer,
+            receive_file_from_viewer: self.receive_file_from_viewer
+                && other.receive_file_from_viewer,
+        }
+    }
+
+    /// Whether this set contains no permissions.
+    pub const fn is_empty(self) -> bool {
+        !self.stream_frame
+            && !self.stream_telemetry
+            && !self.stream_audio
+            && !self.inject_input
+            && !self.read_host_clipboard
+            && !self.write_host_clipboard
+            && !self.send_file_to_viewer
+            && !self.receive_file_from_viewer
     }
 }
 
@@ -431,7 +561,12 @@ impl M1SessionMachine {
         Ok(())
     }
 
-    fn require_active(&self, permission: M1Permission) -> Result<(), M1SessionError> {
+    /// Check that the active session has the exact requested permission.
+    ///
+    /// This is a side-effect-free preflight. It does not record an operation
+    /// or replace the final check that must still run at the protected effect
+    /// boundary.
+    pub fn require_permission(&self, permission: M1Permission) -> Result<(), M1SessionError> {
         if self.state == M1SessionState::Active && self.granted.contains(permission) {
             Ok(())
         } else {
@@ -440,6 +575,10 @@ impl M1SessionMachine {
                 permission,
             })
         }
+    }
+
+    fn require_active(&self, permission: M1Permission) -> Result<(), M1SessionError> {
+        self.require_permission(permission)
     }
 }
 
@@ -944,5 +1083,171 @@ mod tests {
                 M1AuditEvent::SessionEnded
             ]
         );
+    }
+    #[test]
+    fn permission_preflight_is_lane_specific_and_side_effect_free() {
+        let mut session = M1SessionMachine::new();
+        session.offer().unwrap();
+        session
+            .grant_consent_scoped(M1PermissionSet {
+                stream_frame: true,
+                ..M1PermissionSet::default()
+            })
+            .unwrap();
+        let audit_before = session.audit().to_vec();
+
+        assert!(
+            session
+                .require_permission(M1Permission::StreamFrame)
+                .is_ok()
+        );
+        assert_eq!(
+            session.require_permission(M1Permission::StreamTelemetry),
+            Err(M1SessionError::PermissionDenied {
+                state: M1SessionState::Active,
+                permission: M1Permission::StreamTelemetry,
+            })
+        );
+        assert_eq!(session.audit(), audit_before.as_slice());
+
+        // Preflight does not authorize the operation or append an operation
+        // event; the final lane method still performs its own check.
+        session.stream_frame().unwrap();
+        assert_eq!(session.audit().last(), Some(&M1AuditEvent::FrameStreamed));
+    }
+
+    #[test]
+    fn every_permission_mask_preflights_exactly_its_granted_lanes() {
+        fn from_mask(mask: u8) -> M1PermissionSet {
+            M1PermissionSet {
+                stream_frame: mask & (1 << 0) != 0,
+                stream_telemetry: mask & (1 << 1) != 0,
+                stream_audio: mask & (1 << 2) != 0,
+                inject_input: mask & (1 << 3) != 0,
+                read_host_clipboard: mask & (1 << 4) != 0,
+                write_host_clipboard: mask & (1 << 5) != 0,
+                send_file_to_viewer: mask & (1 << 6) != 0,
+                receive_file_from_viewer: mask & (1 << 7) != 0,
+            }
+        }
+
+        for mask in 0u16..=u8::MAX as u16 {
+            let mask = mask as u8;
+            let mut session = M1SessionMachine::new();
+            session.offer().unwrap();
+            session.grant_consent_scoped(from_mask(mask)).unwrap();
+
+            for (index, permission) in M1Permission::ALL.into_iter().enumerate() {
+                let expected = mask & (1 << index) != 0;
+                assert_eq!(
+                    session.require_permission(permission).is_ok(),
+                    expected,
+                    "permission {permission:?} mismatch for grant mask {mask:#010b}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn delegated_action_crosswalk_is_stable_unique_and_directional() {
+        let expected = [
+            (
+                M1Permission::StreamFrame,
+                "xenia.screen.view",
+                M1DataDirection::HostToViewer,
+            ),
+            (
+                M1Permission::StreamTelemetry,
+                "xenia.host.telemetry",
+                M1DataDirection::HostToViewer,
+            ),
+            (
+                M1Permission::StreamAudio,
+                "xenia.audio.capture",
+                M1DataDirection::HostToViewer,
+            ),
+            (
+                M1Permission::InjectInput,
+                "xenia.input.inject",
+                M1DataDirection::ViewerToHost,
+            ),
+            (
+                M1Permission::ReadHostClipboard,
+                "xenia.clipboard.read",
+                M1DataDirection::HostToViewer,
+            ),
+            (
+                M1Permission::WriteHostClipboard,
+                "xenia.clipboard.write",
+                M1DataDirection::ViewerToHost,
+            ),
+            (
+                M1Permission::SendFileToViewer,
+                "xenia.file.send",
+                M1DataDirection::HostToViewer,
+            ),
+            (
+                M1Permission::ReceiveFileFromViewer,
+                "xenia.file.receive",
+                M1DataDirection::ViewerToHost,
+            ),
+        ];
+
+        assert_eq!(M1Permission::ALL.len(), expected.len());
+        for (index, (permission, action_id, direction)) in expected.iter().enumerate() {
+            assert_eq!(M1Permission::ALL[index], *permission);
+            assert_eq!(permission.action_id(), *action_id);
+            assert_eq!(permission.direction(), *direction);
+            assert!(
+                expected[..index]
+                    .iter()
+                    .all(|(_, prior, _)| prior != action_id),
+                "delegated action identifiers must be unique"
+            );
+        }
+    }
+
+    #[test]
+    fn delegated_permission_attenuation_and_intersection_are_exhaustive() {
+        fn from_mask(mask: u8) -> M1PermissionSet {
+            M1PermissionSet {
+                stream_frame: mask & (1 << 0) != 0,
+                stream_telemetry: mask & (1 << 1) != 0,
+                stream_audio: mask & (1 << 2) != 0,
+                inject_input: mask & (1 << 3) != 0,
+                read_host_clipboard: mask & (1 << 4) != 0,
+                write_host_clipboard: mask & (1 << 5) != 0,
+                send_file_to_viewer: mask & (1 << 6) != 0,
+                receive_file_from_viewer: mask & (1 << 7) != 0,
+            }
+        }
+
+        for child_mask in 0u16..=u8::MAX as u16 {
+            for parent_mask in 0u16..=u8::MAX as u16 {
+                let child = from_mask(child_mask as u8);
+                let parent = from_mask(parent_mask as u8);
+                let is_subset = child_mask & !parent_mask == 0;
+                assert_eq!(
+                    child.is_subset_of(parent),
+                    is_subset,
+                    "child={child_mask:08b}, parent={parent_mask:08b}"
+                );
+                assert_eq!(
+                    child.is_strict_subset_of(parent),
+                    is_subset && child_mask != parent_mask,
+                    "strict child={child_mask:08b}, parent={parent_mask:08b}"
+                );
+
+                let common = child.intersection(parent);
+                assert!(common.is_subset_of(child));
+                assert!(common.is_subset_of(parent));
+                assert_eq!(common.is_empty(), child_mask & parent_mask == 0);
+
+                let alternatives = child.union_independent_grants(parent);
+                assert!(child.is_subset_of(alternatives));
+                assert!(parent.is_subset_of(alternatives));
+                assert_eq!(alternatives.is_empty(), child_mask == 0 && parent_mask == 0);
+            }
+        }
     }
 }

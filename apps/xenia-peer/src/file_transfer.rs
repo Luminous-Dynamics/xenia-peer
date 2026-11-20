@@ -151,8 +151,8 @@ pub(crate) async fn handle_envelope(
             let decision = state.evaluate_offer(config, &name, size);
             let reply = match decision {
                 OfferDecision::Accept { safe_name } => {
-                    if let Err(err) = m1_runtime.lock().await.allow_file_receive_flow() {
-                        warn!(error = %err, "file transfer offer rejected by M1 consent gate");
+                    if let Err(err) = m1_runtime.lock().await.preflight_file_receive_flow() {
+                        warn!(error = %err, "file transfer offer rejected by M1 source preflight");
                         FileTransferMessage::Reject {
                             transfer_id,
                             reason: "file receive is not permitted by current consent".to_string(),
@@ -215,10 +215,35 @@ pub(crate) async fn handle_envelope(
                     }
                 }
             };
+
+            // Seal the response first, then re-check the receive lane at the
+            // last local boundary before inviting the sender to transmit. If an
+            // operator revoke was observed during staging or sealing, discard
+            // the staged transfer and send a separately sealed Reject.
+            let accepting_transfer_id = match &reply {
+                FileTransferMessage::Accept { transfer_id } => Some(*transfer_id),
+                _ => None,
+            };
             let envelope = session
                 .lock()
                 .await
                 .seal_file_transfer_message(reply, true)?;
+            if let Some(transfer_id) = accepting_transfer_id
+                && let Err(err) = m1_runtime.lock().await.allow_file_receive_flow()
+            {
+                warn!(error = %err, "file receive revoked after sealing Accept; dropping staged transfer");
+                state.incoming.remove(&transfer_id);
+                let reject = FileTransferMessage::Reject {
+                    transfer_id,
+                    reason: "file receive permission was revoked before acceptance".to_string(),
+                };
+                let reject_envelope = session
+                    .lock()
+                    .await
+                    .seal_file_transfer_message(reject, true)?;
+                send_half.send_envelope(&reject_envelope).await?;
+                return Ok(());
+            }
             send_half.send_envelope(&envelope).await?;
         }
         FileTransferMessage::Accept { transfer_id } => {
@@ -237,8 +262,8 @@ pub(crate) async fn handle_envelope(
                 "transfer accepted, streaming chunks"
             );
             loop {
-                if let Err(err) = m1_runtime.lock().await.allow_file_send_flow() {
-                    warn!(error = %err, "outgoing file transfer halted by M1 consent gate");
+                if let Err(err) = m1_runtime.lock().await.preflight_file_send_flow() {
+                    warn!(error = %err, "outgoing file transfer halted before reading the next chunk");
                     return Ok(());
                 }
                 let Some(chunk) = transfer.source.next_chunk(FILE_TRANSFER_CHUNK_SIZE).await?
@@ -251,13 +276,25 @@ pub(crate) async fn handle_envelope(
                     data: chunk.data,
                 };
                 let envelope = session.lock().await.seal_file_transfer_message(msg, true)?;
+                if let Err(err) = m1_runtime.lock().await.allow_file_send_flow() {
+                    warn!(error = %err, "outgoing file chunk rejected at the send boundary");
+                    return Ok(());
+                }
                 send_half.send_envelope(&envelope).await?;
+            }
+            if let Err(err) = m1_runtime.lock().await.preflight_file_send_flow() {
+                warn!(error = %err, "outgoing file transfer revoked before completion signal");
+                return Ok(());
             }
             let complete = FileTransferMessage::Complete { transfer_id };
             let envelope = session
                 .lock()
                 .await
                 .seal_file_transfer_message(complete, true)?;
+            if let Err(err) = m1_runtime.lock().await.allow_file_send_flow() {
+                warn!(error = %err, "outgoing file transfer rejected at completion send boundary");
+                return Ok(());
+            }
             send_half.send_envelope(&envelope).await?;
             info!(transfer_id, "all chunks sent, awaiting verification");
         }
