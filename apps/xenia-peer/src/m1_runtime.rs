@@ -1983,6 +1983,76 @@ mod tests {
         (runtime, verifying_key)
     }
 
+    #[derive(Default)]
+    struct FakeHostEffects {
+        screen_source_reads: usize,
+        clipboard_source_reads: usize,
+        local_frame_sends: usize,
+        local_clipboard_sends: usize,
+    }
+
+    #[test]
+    fn fake_host_dual_path_enforces_data_minimization_and_independent_clipboard_scope() {
+        // Path A: the task only authorizes screen viewing. Clipboard is kept
+        // available as an attractive but unauthorized shortcut; the real M1
+        // preflight must block the source read, not merely the later send.
+        let (mut screen_only, _) = runtime(35);
+        screen_only.offer().unwrap();
+        screen_only
+            .grant_consent_scoped(M1PermissionSet {
+                stream_frame: true,
+                ..M1PermissionSet::default()
+            })
+            .unwrap();
+
+        let mut host = FakeHostEffects::default();
+        let mut drift_attempts = 0usize;
+        let mut pep_denials = 0usize;
+
+        assert!(screen_only.preflight_frame_flow().is_ok());
+        host.screen_source_reads += 1;
+        screen_only.allow_frame_flow().unwrap();
+        host.local_frame_sends += 1;
+
+        // Simulate an agent/harness attempting clipboard over-collection.
+        drift_attempts += 1;
+        if screen_only.preflight_host_clipboard_read_flow().is_ok() {
+            host.clipboard_source_reads += 1;
+            screen_only.allow_host_clipboard_read_flow().unwrap();
+            host.local_clipboard_sends += 1;
+        } else {
+            pep_denials += 1;
+        }
+
+        assert_eq!(drift_attempts, 1);
+        assert_eq!(pep_denials, 1);
+        assert_eq!(host.screen_source_reads, 1);
+        assert_eq!(host.local_frame_sends, 1);
+        assert_eq!(host.clipboard_source_reads, 0);
+        assert_eq!(host.local_clipboard_sends, 0);
+
+        // Path B: a separate task authorizes clipboard disclosure only.
+        // The lane must work without StreamFrame; no cross-lane implication
+        // or accidental screen-permission dependency is allowed.
+        let (mut clipboard_only, _) = runtime(36);
+        clipboard_only.offer().unwrap();
+        clipboard_only
+            .grant_consent_scoped(M1PermissionSet {
+                read_host_clipboard: true,
+                ..M1PermissionSet::default()
+            })
+            .unwrap();
+
+        assert!(clipboard_only.preflight_host_clipboard_read_flow().is_ok());
+        host.clipboard_source_reads += 1;
+        clipboard_only.allow_host_clipboard_read_flow().unwrap();
+        host.local_clipboard_sends += 1;
+        assert_eq!(host.clipboard_source_reads, 1);
+        assert_eq!(host.local_clipboard_sends, 1);
+        assert!(clipboard_only.preflight_frame_flow().is_err());
+    }
+
+
     #[test]
     fn runtime_preflight_checks_exact_lane_without_creating_ledger_events() {
         let (mut runtime, _) = runtime(31);
