@@ -755,6 +755,28 @@ pub(crate) enum InputEffectExecution {
     OutcomeUnknown(xenia_inject::InjectError),
 }
 
+/// Result class and optional payload from a synchronous host clipboard read.
+#[derive(Debug)]
+pub(crate) enum HostClipboardReadExecution {
+    /// The read API completed; None means no text was available.
+    Completed(Option<String>),
+    /// No OS read call was made.
+    NotAttempted(String),
+    /// The OS read call returned an uncertain error.
+    OutcomeUnknown(String),
+}
+
+/// Result class from a synchronous host clipboard write.
+#[derive(Debug)]
+pub(crate) enum HostClipboardWriteExecution {
+    /// The OS clipboard write API returned success.
+    Applied,
+    /// No OS write call was made (e.g. validation or API setup rejected first).
+    NotAttempted(String),
+    /// The OS write API returned an error after invocation.
+    OutcomeUnknown(String),
+}
+
 pub(crate) struct M1RuntimeSession {
     session: M1SessionMachine,
     chain: Chain,
@@ -1046,6 +1068,50 @@ impl M1RuntimeSession {
             InputEffectExecution::OutcomeUnknown(_) => M1InputEffectOutcome::OutcomeUnknown,
         };
         self.session.record_input_effect_outcome(outcome)?;
+        self.flush_new_audit_events()?;
+        Ok(result)
+    }
+
+    /// Admit host clipboard disclosure, read the local clipboard, and record
+    /// the synchronous read result under the caller-held M1 runtime mutex.
+    pub(crate) fn with_host_clipboard_read_effect(
+        &mut self,
+        effect: impl FnOnce() -> HostClipboardReadExecution,
+    ) -> Result<HostClipboardReadExecution, M1RuntimeError> {
+        self.session.read_host_clipboard()?;
+        self.flush_new_audit_events()?;
+        let result = effect();
+        let outcome = match &result {
+            HostClipboardReadExecution::Completed(_) => M1ClipboardReadOutcome::ReadCompleted,
+            HostClipboardReadExecution::NotAttempted(_) => M1ClipboardReadOutcome::NotAttempted,
+            HostClipboardReadExecution::OutcomeUnknown(_) => {
+                M1ClipboardReadOutcome::OutcomeUnknown
+            }
+        };
+        self.session.record_host_clipboard_read_outcome(outcome)?;
+        self.flush_new_audit_events()?;
+        Ok(result)
+    }
+
+    /// Admit host clipboard mutation, invoke the synchronous OS API, and record
+    /// its result under the caller-held M1 runtime mutex.
+    pub(crate) fn with_host_clipboard_write_effect(
+        &mut self,
+        effect: impl FnOnce() -> HostClipboardWriteExecution,
+    ) -> Result<HostClipboardWriteExecution, M1RuntimeError> {
+        self.session.write_host_clipboard()?;
+        self.flush_new_audit_events()?;
+        let result = effect();
+        let outcome = match &result {
+            HostClipboardWriteExecution::Applied => M1ClipboardWriteOutcome::Applied,
+            HostClipboardWriteExecution::NotAttempted(_) => {
+                M1ClipboardWriteOutcome::NotAttempted
+            }
+            HostClipboardWriteExecution::OutcomeUnknown(_) => {
+                M1ClipboardWriteOutcome::OutcomeUnknown
+            }
+        };
+        self.session.record_host_clipboard_write_outcome(outcome)?;
         self.flush_new_audit_events()?;
         Ok(result)
     }
