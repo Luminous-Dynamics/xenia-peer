@@ -155,21 +155,21 @@ pub enum M1AuditEvent {
     ConsentGranted,
     /// Consent was denied.
     ConsentDenied,
-    /// A frame was allowed through the active session.
+    /// Legacy success-shaped label; new code emits FramePermissionAdmitted.
     FrameStreamed,
-    /// A telemetry batch was allowed through the active session.
+    /// Legacy success-shaped label; new code emits TelemetryPermissionAdmitted.
     TelemetryStreamed,
-    /// An audio frame was allowed through the active session.
+    /// Legacy success-shaped label; new code emits AudioPermissionAdmitted.
     AudioStreamed,
-    /// An input event was allowed through the active session.
+    /// Legacy success-shaped label; new code emits InputPermissionAdmitted.
     InputInjected,
-    /// Host clipboard contents were disclosed to the viewer.
+    /// Legacy success-shaped label; new code emits HostClipboardReadPermissionAdmitted.
     HostClipboardRead,
-    /// A viewer-originated clipboard update was applied to the host clipboard.
+    /// Legacy success-shaped label; new code emits HostClipboardWritePermissionAdmitted.
     HostClipboardWritten,
-    /// Host file bytes were sent to the viewer.
+    /// Legacy success-shaped label; new code emits FileSendPermissionAdmitted.
     FileSentToViewer,
-    /// Viewer file bytes were accepted for host storage.
+    /// Legacy success-shaped label; new code emits FileReceivePermissionAdmitted.
     FileReceivedFromViewer,
     /// Consent was revoked.
     ConsentRevoked,
