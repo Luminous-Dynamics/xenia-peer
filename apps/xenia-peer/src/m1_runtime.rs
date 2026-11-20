@@ -30,7 +30,8 @@ use xenia_ledger::{
     SignatureEnvelope, SignatureSuite, Verifier, VerifyError,
 };
 use xenia_peer_core::{
-    M1Permission, M1PermissionSet, M1SessionError, M1SessionMachine, M1SessionState,
+    M1AuditEvent, M1Permission, M1PermissionSet, M1SessionError, M1SessionMachine,
+    M1SessionState,
 };
 
 use crate::m1_ledger::consent_record_for_m1_event;
@@ -811,6 +812,10 @@ impl M1RuntimeSession {
 
     pub(crate) fn state(&self) -> M1SessionState {
         self.session.state()
+    }
+
+    pub(crate) fn audit_events(&self) -> &[M1AuditEvent] {
+        self.session.audit()
     }
 
     pub(crate) fn entries(&self) -> Vec<LedgerEntry> {
