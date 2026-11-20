@@ -6621,32 +6621,53 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         continue;
                     }
                 };
-                {
+                let width = screen_dims.0.load(Ordering::Relaxed);
+                let height = screen_dims.1.load(Ordering::Relaxed);
+                // Permission admission, the synchronous platform call and its
+                // outcome event share the M1 runtime lock with revoke(). This
+                // is the local effect-owner linearization point.
+                let injection_result = {
                     let mut m1_runtime = m1_runtime.lock().await;
-                    if let Err(err) = m1_runtime.allow_input_flow() {
+                    m1_runtime.with_input_effect(|| {
+                        let injector = injector.get_or_insert_with(|| {
+                            SessionInputInjector::new(build_input_injector(
+                                input_backend,
+                                width,
+                                height,
+                            ))
+                        });
+                        if injector.backend_name() == "noop" {
+                            return Err(xenia_inject::InjectError::Unavailable(
+                                "configured input backend is unavailable".to_string(),
+                            ));
+                        }
+                        injector.process_events(std::slice::from_ref(&event))
+                    })
+                };
+                let injection_result = match injection_result {
+                    Ok(result) => result,
+                    Err(err) => {
                         warn!(error = %err, "input event rejected by M1 consent gate");
                         continue;
                     }
-                }
-
-                let width = screen_dims.0.load(Ordering::Relaxed);
-                let height = screen_dims.1.load(Ordering::Relaxed);
-                let injector = injector.get_or_insert_with(|| {
-                    SessionInputInjector::new(build_input_injector(input_backend, width, height))
-                });
-                match injector.process_events(std::slice::from_ref(&event)) {
+                };
+                let backend = injector
+                    .as_ref()
+                    .map(SessionInputInjector::backend_name)
+                    .unwrap_or("unavailable");
+                match injection_result {
                     Ok(()) => {
                         info!(
                             ?event,
-                            backend = injector.backend_name(),
-                            "input event injected"
+                            backend,
+                            "platform input injector accepted event"
                         );
                     }
                     Err(err) => {
                         warn!(
                             error = %err,
-                            backend = injector.backend_name(),
-                            "input injection failed"
+                            backend,
+                            "input injector returned an uncertain outcome"
                         );
                     }
                 }
