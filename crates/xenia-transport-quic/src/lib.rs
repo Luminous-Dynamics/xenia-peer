@@ -305,30 +305,50 @@ async fn write_all_cancel_safe(
     Ok(())
 }
 
-/// RAII guard: if an envelope write future is dropped before a complete
-/// envelope is written, terminate the send stream and mark the direction
-/// unusable. This covers cancellation by an outer caller as well as timeout.
-struct SendEnvelopeGuard<'a> {
-    send: &'a mut SendStream,
+/// RAII guard for one in-flight framed operation on a QUIC stream direction.
+///
+/// If the future is dropped before `complete`, the direction is marked
+/// terminal and the supplied synchronous cleanup function closes/stops it.
+struct StreamSideGuard<'a, S, F>
+where
+    F: FnMut(&mut S),
+{
+    stream: &'a mut S,
     terminal: &'a mut bool,
+    terminate: F,
     completed: bool,
 }
 
-impl<'a> SendEnvelopeGuard<'a> {
-    fn new(send: &'a mut SendStream, terminal: &'a mut bool) -> Self {
+impl<'a, S, F> StreamSideGuard<'a, S, F>
+where
+    F: FnMut(&mut S),
+{
+    fn new(stream: &'a mut S, terminal: &'a mut bool, terminate: F) -> Self {
         Self {
-            send,
+            stream,
             terminal,
+            terminate,
             completed: false,
         }
     }
+
+    fn stream_mut(&mut self) -> &mut S {
+        self.stream
+    }
+
+    fn complete(&mut self) {
+        self.completed = true;
+    }
 }
 
-impl Drop for SendEnvelopeGuard<'_> {
+impl<S, F> Drop for StreamSideGuard<'_, S, F>
+where
+    F: FnMut(&mut S),
+{
     fn drop(&mut self) {
         if !self.completed {
-            let _ = self.send.finish();
             *self.terminal = true;
+            (self.terminate)(self.stream);
         }
     }
 }
@@ -349,16 +369,18 @@ async fn write_envelope_with_timeout(
     }
     ensure_stream_side_open(*terminal)?;
 
-    let mut guard = SendEnvelopeGuard::new(send, terminal);
+    let mut guard = StreamSideGuard::new(send, terminal, |stream: &mut SendStream| {
+        let _ = stream.finish();
+    });
     let result = tokio::time::timeout(timeout, async {
-        write_all_cancel_safe(&mut *guard.send, &len.to_be_bytes()).await?;
-        write_all_cancel_safe(&mut *guard.send, bytes).await
+        write_all_cancel_safe(guard.stream_mut(), &len.to_be_bytes()).await?;
+        write_all_cancel_safe(guard.stream_mut(), bytes).await
     })
     .await;
 
     match result {
         Ok(Ok(())) => {
-            guard.completed = true;
+            guard.complete();
             Ok(())
         }
         Ok(Err(error)) => Err(error),
@@ -435,42 +457,17 @@ async fn read_envelope(recv: &mut RecvStream) -> Result<Vec<u8>, TransportError>
     read_envelope_with_timeout(recv, Duration::from_millis(RECEIVE_ENVELOPE_TIMEOUT_MS)).await
 }
 
-/// RAII guard: dropping an in-flight framed read leaves the stream offset
-/// unknown, so stop the peer and permanently close this receive direction.
-struct ReceiveEnvelopeGuard<'a> {
-    recv: &'a mut RecvStream,
-    terminal: &'a mut bool,
-    completed: bool,
-}
-
-impl<'a> ReceiveEnvelopeGuard<'a> {
-    fn new(recv: &'a mut RecvStream, terminal: &'a mut bool) -> Self {
-        Self {
-            recv,
-            terminal,
-            completed: false,
-        }
-    }
-}
-
-impl Drop for ReceiveEnvelopeGuard<'_> {
-    fn drop(&mut self) {
-        if !self.completed {
-            *self.terminal = true;
-            let _ = self.recv.stop(VarInt::from_u32(0));
-        }
-    }
-}
-
 async fn recv_envelope_guarded(
     recv: &mut RecvStream,
     terminal: &mut bool,
 ) -> Result<Vec<u8>, TransportError> {
     ensure_stream_side_open(*terminal)?;
-    let mut guard = ReceiveEnvelopeGuard::new(recv, terminal);
-    let result = read_envelope(&mut *guard.recv).await;
+    let mut guard = StreamSideGuard::new(recv, terminal, |stream: &mut RecvStream| {
+        let _ = stream.stop(VarInt::from_u32(0));
+    });
+    let result = read_envelope(guard.stream_mut()).await;
     if result.is_ok() {
-        guard.completed = true;
+        guard.complete();
     }
     result
 }
@@ -551,6 +548,45 @@ mod tests {
             ensure_stream_side_open(true),
             Err(TransportError::UnexpectedEof)
         );
+    }
+
+    #[derive(Default)]
+    struct FakeStream {
+        terminated: bool,
+        operations: usize,
+    }
+
+    fn terminate_fake_stream(stream: &mut FakeStream) {
+        stream.terminated = true;
+    }
+
+    #[test]
+    fn dropping_incomplete_stream_guard_runs_cleanup_and_sets_terminal() {
+        let mut stream = FakeStream::default();
+        let mut terminal = false;
+        {
+            let mut guard =
+                StreamSideGuard::new(&mut stream, &mut terminal, terminate_fake_stream);
+            guard.stream_mut().operations += 1;
+        }
+        assert!(stream.terminated);
+        assert!(terminal);
+        assert_eq!(stream.operations, 1);
+    }
+
+    #[test]
+    fn completing_stream_guard_preserves_open_direction() {
+        let mut stream = FakeStream::default();
+        let mut terminal = false;
+        {
+            let mut guard =
+                StreamSideGuard::new(&mut stream, &mut terminal, terminate_fake_stream);
+            guard.stream_mut().operations += 1;
+            guard.complete();
+        }
+        assert!(!stream.terminated);
+        assert!(!terminal);
+        assert_eq!(stream.operations, 1);
     }
 
     #[test]
