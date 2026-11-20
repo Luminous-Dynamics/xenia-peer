@@ -308,6 +308,8 @@ pub struct SchedulerStats {
     pub superseded_video: u64,
     /// Items removed because their deadline or maximum age elapsed.
     pub expired: u64,
+    /// Video deltas removed because a required queued reference was dropped.
+    pub invalidated_video_dependencies: u64,
     /// Rejected admissions.
     pub rejected: u64,
     /// Items selected for dispatch.
@@ -518,6 +520,7 @@ impl DeliveryScheduler {
             let removed = queue.items.len();
             queue.items.clear();
             queue.bytes = 0;
+            self.known_video_references.clear();
             queue.push(item);
             self.stats.superseded_video = self
                 .stats
@@ -669,7 +672,14 @@ impl DeliveryScheduler {
                 if let Some(id) = frame_id {
                     invalidated.push(id);
                 }
-                self.stats.expired = self.stats.expired.saturating_add(1);
+                if expired {
+                    self.stats.expired = self.stats.expired.saturating_add(1);
+                } else {
+                    self.stats.invalidated_video_dependencies = self
+                        .stats
+                        .invalidated_video_dependencies
+                        .saturating_add(1);
+                }
             } else {
                 retained.push_back(item);
             }
@@ -820,12 +830,19 @@ mod tests {
     #[test]
     fn stale_video_reference_invalidates_its_dependent_delta_chain() {
         let mut scheduler = DeliveryScheduler::new(SchedulerConfig::default()).unwrap();
-        assert_eq!(scheduler.enqueue(video(1, 10, None, Some(5)), 0), EnqueueDisposition::Accepted);
+        assert_eq!(
+            scheduler.enqueue(video(1, 10, None, Some(5)), 0),
+            EnqueueDisposition::Accepted
+        );
         assert_eq!(scheduler.enqueue(video(2, 11, Some(10), None), 0), EnqueueDisposition::Accepted);
         assert_eq!(scheduler.enqueue(video(3, 12, Some(11), None), 0), EnqueueDisposition::Accepted);
         assert!(scheduler.next_ready(5).is_none());
         assert_eq!(scheduler.snapshot().lanes[DeliveryClass::Video.index()].queued_items, 0);
-        assert_eq!(scheduler.snapshot().stats.expired, 3);
+        assert_eq!(scheduler.snapshot().stats.expired, 1);
+        assert_eq!(
+            scheduler.snapshot().stats.invalidated_video_dependencies,
+            2
+        );
     }
 
     #[test]
