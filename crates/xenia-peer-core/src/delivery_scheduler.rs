@@ -9,10 +9,11 @@
 //! selecting an item. A selected item is not proof of remote receipt,
 //! decoding, presentation or effect commit.
 //!
-//! V0.1 uses a fixed weighted service cycle. Control transitions are ordered
-//! and non-coalescible; video is freshness-first but preserves declared
-//! reference dependencies; audio is deadline-bound; telemetry is coalesced by
-//! metric key; bulk transfer is bounded and never silently superseded.
+//! V0.1 uses weighted deficit round robin (WDRR) with byte-cost accounting.
+//! Control transitions are ordered and non-coalescible; video is freshness-first
+//! but preserves declared reference dependencies; audio is deadline-bound;
+//! telemetry is coalesced by metric key; bulk transfer is bounded and never
+//! silently superseded. Quantum weights are provisional benchmark parameters.
 
 use std::collections::VecDeque;
 
@@ -626,13 +627,17 @@ impl DeliveryScheduler {
         self.reject(RejectReason::Full)
     }
 
-    /// Select the next eligible item using the fixed weighted service cycle.
+    /// Select the next eligible item using weighted deficit round robin.
     ///
     /// Expired audio, video and telemetry items are pruned first. Control and
     /// bulk work is never aged out by this scheduler. A selected item is only
     /// a local dispatch decision, not proof of remote observation or commit.
     pub fn next_ready(&mut self, now_ticks: u64) -> Option<WorkItem> {
         self.prune_expired(now_ticks);
+        if self.queues.iter().all(|queue| queue.items.is_empty()) {
+            self.deficits = [0; 5];
+            return None;
+        }
         for _ in 0..self.max_visits_per_selection {
             let class = DeliveryClass::ALL[self.cursor];
             let index = class.index();
@@ -645,6 +650,9 @@ impl DeliveryScheduler {
                 if self.deficits[index] >= cost_bytes {
                     if let Some(item) = self.queues[index].pop() {
                         self.deficits[index] -= cost_bytes;
+                        if self.queues[index].items.is_empty() {
+                            self.deficits[index] = 0;
+                        }
                         self.stats.dispatched = self.stats.dispatched.saturating_add(1);
                         return Some(item);
                     }
@@ -906,7 +914,10 @@ mod tests {
     fn independent_video_frame_supersedes_pending_dependency_chain() {
         let mut scheduler = new_scheduler(SchedulerConfig::default());
         assert_eq!(scheduler.enqueue(video(1, 10, None, None), 0), EnqueueDisposition::Accepted);
-        assert_eq!(scheduler.enqueue(video(2, 11, Some(10), None), 0), EnqueueDisposition::Accepted);
+        assert_eq!(
+            scheduler.enqueue(video(2, 11, Some(10), None), 0),
+            EnqueueDisposition::Accepted
+        );
         assert_eq!(
             scheduler.enqueue(video(3, 20, None, None), 0),
             EnqueueDisposition::Superseded { removed_items: 2 }
@@ -922,8 +933,14 @@ mod tests {
             scheduler.enqueue(video(1, 10, None, Some(5)), 0),
             EnqueueDisposition::Accepted
         );
-        assert_eq!(scheduler.enqueue(video(2, 11, Some(10), None), 0), EnqueueDisposition::Accepted);
-        assert_eq!(scheduler.enqueue(video(3, 12, Some(11), None), 0), EnqueueDisposition::Accepted);
+        assert_eq!(
+            scheduler.enqueue(video(2, 11, Some(10), None), 0),
+            EnqueueDisposition::Accepted
+        );
+        assert_eq!(
+            scheduler.enqueue(video(3, 12, Some(11), None), 0),
+            EnqueueDisposition::Accepted
+        );
         assert!(scheduler.next_ready(5).is_none());
         assert_eq!(scheduler.snapshot().lanes[DeliveryClass::Video.index()].queued_items, 0);
         assert_eq!(scheduler.snapshot().stats.expired, 1);
