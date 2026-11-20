@@ -13,7 +13,7 @@
 //! envelope. The frame digest provides assembly consistency; it is not a
 //! replacement for AEAD, a sender signature, or authorization.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::frame::PixelFormat;
 
@@ -29,6 +29,9 @@ pub const DEFAULT_MAX_FRAGMENT_BYTES: usize = 64 * 1024;
 pub const DEFAULT_MAX_TOTAL_FRAGMENTS: usize = 4_096;
 /// Maximum fragments per frame.
 pub const DEFAULT_MAX_FRAGMENTS_PER_FRAME: u16 = 1_024;
+/// Bounded recent-frame tombstones prevent delayed duplicate fragments from
+/// recreating a completed, expired, aborted or invalidated frame.
+pub const MAX_TERMINAL_FRAME_HISTORY: usize = 2_048;
 
 /// Identity of one frame within a session and negotiated key epoch.
 ///
@@ -122,6 +125,8 @@ pub enum FrameReassemblyConfigError {
     FrameLimitExceedsAggregate,
     /// Fragment descriptors cannot represent at least one allowed frame.
     FragmentLimitInconsistent,
+    /// A caller-supplied value exceeds a compile-time hard memory/work ceiling.
+    LimitExceedsHardMaximum,
 }
 
 /// Why a fragment was rejected.
@@ -148,6 +153,8 @@ pub enum FrameFragmentError {
     FrameTooLarge,
     /// Width or height is zero.
     InvalidDimensions,
+    /// Frame already completed, expired, aborted or failed validation.
+    FrameAlreadyFinalized,
     /// Same frame key arrived with inconsistent immutable metadata.
     MetadataConflict,
     /// Same fragment index arrived with different payload bytes.
@@ -258,6 +265,8 @@ pub struct FrameReassembler {
     assemblies: HashMap<FragmentFrameKey, FrameAssembly>,
     reserved_bytes: usize,
     reserved_fragments: usize,
+    terminal_frames: HashSet<FragmentFrameKey>,
+    terminal_order: VecDeque<FragmentFrameKey>,
     last_now_ticks: Option<u64>,
 }
 
@@ -278,6 +287,15 @@ impl FrameReassembler {
         {
             return Err(FrameReassemblyConfigError::ZeroLimit);
         }
+        if config.max_in_flight_frames > DEFAULT_MAX_IN_FLIGHT_FRAMES
+            || config.max_reassembly_bytes > DEFAULT_MAX_REASSEMBLY_BYTES
+            || config.max_frame_bytes > DEFAULT_MAX_FRAME_BYTES
+            || config.max_fragment_bytes > DEFAULT_MAX_FRAGMENT_BYTES
+            || config.max_total_fragments > DEFAULT_MAX_TOTAL_FRAGMENTS
+            || config.max_fragments_per_frame > DEFAULT_MAX_FRAGMENTS_PER_FRAME
+        {
+            return Err(FrameReassemblyConfigError::LimitExceedsHardMaximum);
+        }
         if config.max_frame_bytes > config.max_reassembly_bytes {
             return Err(FrameReassemblyConfigError::FrameLimitExceedsAggregate);
         }
@@ -291,6 +309,8 @@ impl FrameReassembler {
             assemblies: HashMap::new(),
             reserved_bytes: 0,
             reserved_fragments: 0,
+            terminal_frames: HashSet::new(),
+            terminal_order: VecDeque::new(),
             last_now_ticks: None,
         })
     }
@@ -317,6 +337,9 @@ impl FrameReassembler {
                 current: self.key_epoch,
                 observed: fragment.key.key_epoch,
             });
+        }
+        if self.terminal_frames.contains(&fragment.key) {
+            return Err(FrameFragmentError::FrameAlreadyFinalized);
         }
         if fragment.fragment_count == 0
             || fragment.fragment_count > self.config.max_fragments_per_frame
@@ -362,6 +385,7 @@ impl FrameReassembler {
         if let Some((metadata_matches, duplicate, received, total)) = existing_state {
             if !metadata_matches {
                 self.remove_assembly(fragment.key);
+                self.record_terminal(fragment.key);
                 return Err(FrameFragmentError::MetadataConflict);
             }
             if let Some(identical) = duplicate {
@@ -372,6 +396,7 @@ impl FrameReassembler {
                     });
                 }
                 self.remove_assembly(fragment.key);
+                self.record_terminal(fragment.key);
                 return Err(FrameFragmentError::ConflictingDuplicate);
             }
         } else {
@@ -421,6 +446,7 @@ impl FrameReassembler {
             });
         if exceeds_declared_size {
             self.remove_assembly(fragment.key);
+            self.record_terminal(fragment.key);
             return Err(FrameFragmentError::ExceedsDeclaredFrameSize);
         }
 
@@ -452,6 +478,7 @@ impl FrameReassembler {
         let completed = self
             .remove_assembly(fragment.key)
             .ok_or(FrameFragmentError::MetadataConflict)?;
+        self.record_terminal(fragment.key);
         if completed.received_bytes != completed.total_frame_bytes {
             return Err(FrameFragmentError::IncompleteLength);
         }
@@ -499,6 +526,8 @@ impl FrameReassembler {
         self.assemblies.clear();
         self.reserved_bytes = 0;
         self.reserved_fragments = 0;
+        self.terminal_frames.clear();
+        self.terminal_order.clear();
         self.key_epoch = new_epoch;
         Ok(discarded)
     }
@@ -506,7 +535,12 @@ impl FrameReassembler {
     /// Abort one incomplete frame, for example after a deadline or dependency
     /// invalidation decision made by the caller.
     pub fn abort_frame(&mut self, key: FragmentFrameKey) -> bool {
-        self.remove_assembly(key).is_some()
+        if self.remove_assembly(key).is_some() {
+            self.record_terminal(key);
+            true
+        } else {
+            false
+        }
     }
 
     /// Snapshot current bounded state.
@@ -547,8 +581,21 @@ impl FrameReassembler {
         let count = expired.len();
         for key in expired {
             self.remove_assembly(key);
+            self.record_terminal(key);
         }
         count
+    }
+
+    fn record_terminal(&mut self, key: FragmentFrameKey) {
+        if !self.terminal_frames.insert(key) {
+            return;
+        }
+        self.terminal_order.push_back(key);
+        while self.terminal_order.len() > MAX_TERMINAL_FRAME_HISTORY {
+            if let Some(oldest) = self.terminal_order.pop_front() {
+                self.terminal_frames.remove(&oldest);
+            }
+        }
     }
 
     fn remove_assembly(&mut self, key: FragmentFrameKey) -> Option<FrameAssembly> {
@@ -639,6 +686,24 @@ mod tests {
             other => panic!("expected completed frame, got {other:?}"),
         }
         assert_eq!(reassembler.snapshot().reserved_bytes, 0);
+    }
+
+    #[test]
+    fn late_fragments_cannot_recreate_a_completed_frame() {
+        let payload = b"abcdefgh";
+        let digest = frame_digest(payload);
+        let mut reassembler = reassembler();
+        assert!(reassembler
+            .push(fragment(30, 0, 2, 8, digest, b"abcd"), 0)
+            .is_ok());
+        assert!(matches!(
+            reassembler.push(fragment(30, 1, 2, 8, digest, b"efgh"), 1),
+            Ok(FrameFragmentDisposition::Completed(_))
+        ));
+        assert_eq!(
+            reassembler.push(fragment(30, 0, 2, 8, digest, b"abcd"), 2),
+            Err(FrameFragmentError::FrameAlreadyFinalized)
+        );
     }
 
     #[test]
@@ -796,6 +861,18 @@ mod tests {
             Err(FrameFragmentError::FrameCapacityFull)
         );
         assert_eq!(reassembler.snapshot().reserved_bytes, 8);
+    }
+
+    #[test]
+    fn hard_configuration_maxima_are_enforced() {
+        let config = FrameReassemblyConfig {
+            max_reassembly_bytes: DEFAULT_MAX_REASSEMBLY_BYTES + 1,
+            ..FrameReassemblyConfig::default()
+        };
+        assert_eq!(
+            FrameReassembler::new([1; 32], 4, config).err(),
+            Some(FrameReassemblyConfigError::LimitExceedsHardMaximum)
+        );
     }
 
     #[test]
