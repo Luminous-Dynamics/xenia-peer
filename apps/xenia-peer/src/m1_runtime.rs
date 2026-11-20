@@ -2086,6 +2086,67 @@ mod tests {
     }
 
     #[test]
+    fn host_clipboard_owner_outcomes_are_recorded() {
+        let (mut runtime, _) = runtime(63);
+        runtime.offer().unwrap();
+        runtime
+            .grant_consent_scoped(M1PermissionSet {
+                read_host_clipboard: true,
+                write_host_clipboard: true,
+                ..M1PermissionSet::default()
+            })
+            .unwrap();
+
+        let read = runtime
+            .with_host_clipboard_read_effect(|| {
+                HostClipboardReadExecution::Completed(Some("private text".to_string()))
+            })
+            .unwrap_or_else(|error| panic!("read failed: {error:?}"));
+        assert!(matches!(read, HostClipboardReadExecution::Completed(Some(_))));
+        let write = runtime
+            .with_host_clipboard_write_effect(|| HostClipboardWriteExecution::Applied)
+            .unwrap_or_else(|error| panic!("write failed: {error:?}"));
+        assert!(matches!(write, HostClipboardWriteExecution::Applied));
+
+        let audit = runtime.audit_events();
+        assert!(audit.contains(
+            &xenia_peer_core::M1AuditEvent::HostClipboardReadPermissionAdmitted
+        ));
+        assert!(audit.contains(
+            &xenia_peer_core::M1AuditEvent::HostClipboardReadCompleted
+        ));
+        assert!(audit.contains(
+            &xenia_peer_core::M1AuditEvent::HostClipboardWritePermissionAdmitted
+        ));
+        assert!(audit.contains(
+            &xenia_peer_core::M1AuditEvent::HostClipboardWriteApplied
+        ));
+    }
+
+    #[test]
+    fn clipboard_owner_effects_are_not_invoked_without_permission() {
+        let (mut runtime, _) = runtime(64);
+        runtime.offer().unwrap();
+        runtime.grant_consent_scoped(M1PermissionSet::default()).unwrap();
+
+        let read_called = std::cell::Cell::new(false);
+        let read = runtime.with_host_clipboard_read_effect(|| {
+            read_called.set(true);
+            HostClipboardReadExecution::Completed(None)
+        });
+        assert!(read.is_err());
+        assert!(!read_called.get());
+
+        let write_called = std::cell::Cell::new(false);
+        let write = runtime.with_host_clipboard_write_effect(|| {
+            write_called.set(true);
+            HostClipboardWriteExecution::Applied
+        });
+        assert!(write.is_err());
+        assert!(!write_called.get());
+    }
+
+    #[test]
     fn input_effect_is_not_invoked_without_permission() {
         let (mut runtime, _) = runtime(62);
         runtime.offer().unwrap();
