@@ -195,16 +195,17 @@ The model implements:
 - monotonic sequence admission for control, audio and video frame identities;
 - deadline/age pruning for video, audio and telemetry, while control and bulk are never silently aged out;
 - keyframe reset and delta-reference validation, including cascading invalidation of deltas that depend on an expired reference;
+- installation of a new initial decoder reference clears queued frames from the old reference context and resets the Video lane's deficit/visit state;
 - an explicit invalidation method for dependent video frames after the transport proves a selected frame was not sent; ambiguous send outcomes still require session reconciliation;
 - same-key telemetry coalescing and bounded bulk backpressure;
 - bounded descriptor counts (4,096 maximum per lane) as well as byte caps (64 MiB maximum);
 - explicit local counters and queue snapshots.
 
-Configuration rejects zero capacities, zero age budgets, lane capacities above 64 MiB, item capacities above 4,096 and byte quanta below 8 KiB so the selection loop has a bounded visit budget. The default quanta are hypotheses, not optimized settings. They must be compared against static item-weighted service and the AoI-aware candidate before being treated as a good operating point.
+Configuration rejects zero capacities, zero age budgets, lane capacities above 64 MiB, item capacities above 4,096, byte quanta below 8 KiB, and any quantum larger than its lane's byte capacity so the configured weights cannot be silently clipped and the selection loop has a bounded visit budget. The default quanta are hypotheses, not optimized settings. They must be compared against static item-weighted service and the AoI-aware candidate before being treated as a good operating point.
 
 **Important scheduling boundary:** this model selects whole work items. WDRR byte accounting does not preempt a large send after the caller starts writing it. A whole 4–16 MiB frame or file chunk can still create non-preemptible sender blocking, depending on the transport writer. A bounded, frame-safe fragmentation/preemption contract is tracked separately in [#529](https://github.com/Luminous-Dynamics/xenia-peer/issues/529). Do not infer an end-to-end control p99 guarantee from this queue model alone.
 
-Unit tests are authored for control ordering/full-queue behavior, audio/video sequence monotonicity, telemetry coalescing, keyframe dependency resets, known-unsent dependency invalidation, stale reference chains, audio deadlines, bulk retention, byte-deficit service across classes, a sustained two-item-per-class quantum-yield regression, queue bounds, and invalid configuration.
+Unit tests are authored for control ordering/full-queue behavior, audio/video sequence monotonicity, telemetry coalescing, keyframe dependency resets, known-unsent dependency invalidation, stale reference chains, audio deadlines, bulk retention, byte-deficit service across classes, a sustained two-item-per-class quantum-yield regression, initial-reference queue/deficit reset, quantum-versus-capacity validation, queue bounds, and invalid configuration.
 
 A source review found and corrected an initial WDRR visit-state bug: after a lane spent its quantum exactly, it could receive another quantum on the next call without yielding, starving other lanes. The scheduler now tracks whether the current visit has already received its quantum and advances when the remaining deficit cannot cover the next head item. The new fairness regression test checks two items per lane in the expected cyclic service order. This is authored test coverage, not an executed test result.
 
