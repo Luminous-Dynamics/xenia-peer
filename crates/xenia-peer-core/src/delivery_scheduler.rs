@@ -1432,6 +1432,135 @@ mod tests {
     }
 
     #[test]
+    fn wdrr_accounting_matches_quantum_grants_under_continuous_backlog() {
+        let mut config = config_with_capacity(128);
+        config.quantum_bytes = [
+            MIN_QUANTUM_BYTES,
+            MIN_QUANTUM_BYTES + 4 * 1024,
+            MIN_QUANTUM_BYTES + 8 * 1024,
+            MIN_QUANTUM_BYTES + 12 * 1024,
+            MIN_QUANTUM_BYTES + 16 * 1024,
+        ];
+        let mut scheduler = new_scheduler(config);
+        scheduler.set_initial_video_reference(0);
+        let sizes = [4 * 1024, 16 * 1024, 8 * 1024, 12 * 1024];
+        let max_item_bytes = [16 * 1024; 5];
+
+        for sequence in 1..=64_u64 {
+            let size = sizes[((sequence - 1) as usize) % sizes.len()];
+            assert_eq!(
+                scheduler.enqueue(
+                    item(
+                        sequence,
+                        0,
+                        None,
+                        size,
+                        WorkKind::Control {
+                            sequence,
+                            operation_id: [sequence as u8; 16],
+                            transition: ControlTransition::KeyDown,
+                        },
+                    ),
+                    0,
+                ),
+                EnqueueDisposition::Accepted
+            );
+            assert_eq!(
+                scheduler.enqueue(
+                    item(
+                        100 + sequence,
+                        0,
+                        None,
+                        size,
+                        WorkKind::Video {
+                            frame_id: sequence,
+                            depends_on: Some(sequence - 1),
+                        },
+                    ),
+                    0,
+                ),
+                EnqueueDisposition::Accepted
+            );
+            assert_eq!(
+                scheduler.enqueue(
+                    item(
+                        200 + sequence,
+                        0,
+                        None,
+                        size,
+                        WorkKind::Audio { sequence },
+                    ),
+                    0,
+                ),
+                EnqueueDisposition::Accepted
+            );
+            assert_eq!(
+                scheduler.enqueue(
+                    item(
+                        300 + sequence,
+                        0,
+                        None,
+                        size,
+                        WorkKind::Telemetry {
+                            metric_key: sequence as u16,
+                        },
+                    ),
+                    0,
+                ),
+                EnqueueDisposition::Accepted
+            );
+            assert_eq!(
+                scheduler.enqueue(
+                    item(
+                        400 + sequence,
+                        0,
+                        None,
+                        size,
+                        WorkKind::Bulk {
+                            transfer_id: [7; 16],
+                            offset: sequence,
+                            digest: [sequence as u8; 32],
+                        },
+                    ),
+                    0,
+                ),
+                EnqueueDisposition::Accepted
+            );
+        }
+
+        for _ in 0..100 {
+            let next = selected(&mut scheduler, 0);
+            if let WorkKind::Video { frame_id, .. } = next.kind {
+                scheduler.record_video_dispatched(frame_id);
+            }
+        }
+
+        let snapshot = scheduler.snapshot();
+        for class in DeliveryClass::ALL {
+            let index = class.index();
+            let quantum = scheduler.config.quantum_bytes[index] as u64;
+            let visits = snapshot.stats.lane_visits[index];
+            let served = snapshot.stats.dispatched_bytes[index];
+            let deficit = snapshot.lanes[index].deficit_bytes as u64;
+            assert_eq!(
+                served.saturating_add(deficit),
+                visits.saturating_mul(quantum),
+                "lane {class:?}: service plus deficit must equal granted quanta"
+            );
+            assert!(
+                snapshot.lanes[index].queued_items > 0,
+                "class {class:?} must remain continuously backlogged"
+            );
+            if !(scheduler.visit_active && scheduler.cursor == index) {
+                assert!(
+                    deficit < max_item_bytes[index] as u64,
+                    "inactive lane {class:?} must retain less than one maximum item"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn deficit_round_robin_yields_after_each_class_quantum() {
         let mut config = config_with_capacity(8);
         config.quantum_bytes = [MIN_QUANTUM_BYTES; 5];
