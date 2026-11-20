@@ -866,6 +866,13 @@ mod tests {
                 event: OperationEventKind::OutcomeObserved,
             })
         );
+        assert_eq!(
+            ledger.mark_not_committed(operation(4), 11, [10; 32]),
+            Err(OperationEvidenceError::InvalidTransition {
+                from: OperationState::Admitted,
+                event: OperationEventKind::EffectNotCommitted,
+            })
+        );
         assert_eq!(ledger.events().len(), 1);
         assert!(ledger.verify_chain());
     }
