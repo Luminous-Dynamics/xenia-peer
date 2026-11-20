@@ -130,6 +130,8 @@ pub struct EffectGateSnapshot {
     pub active: bool,
     /// Number of unique operation IDs already issued by this gate.
     pub issued_operations: usize,
+    /// Number of permits still eligible for local commit.
+    pub pending_operations: usize,
     /// Number of dispatched operations whose outcome is still unresolved.
     pub unresolved_unknown_operations: usize,
 }
@@ -200,6 +202,8 @@ pub enum EffectGateError {
     ForeignGatePermit,
     /// The gate has observed revocation and is inactive.
     Revoked,
+    /// The permit was invalidated by revocation, epoch advance or UNKNOWN.
+    PermitInvalidated,
     /// The permit/request epoch is not the gate's current epoch.
     AuthorityEpochMismatch {
         /// Current gate epoch.
@@ -246,6 +250,7 @@ struct GateInner {
     authority_epoch: u64,
     phase: GatePhase,
     issued_operations: HashSet<[u8; 16]>,
+    pending_operations: HashSet<[u8; 16]>,
     unknown_operations: HashMap<[u8; 16], [u8; 32]>,
     reconciled_operations: HashMap<[u8; 16], EffectReconciliationReceipt>,
 }
@@ -281,6 +286,7 @@ impl EffectCommitGate {
                 authority_epoch,
                 phase: GatePhase::Active,
                 issued_operations: HashSet::new(),
+                pending_operations: HashSet::new(),
                 unknown_operations: HashMap::new(),
                 reconciled_operations: HashMap::new(),
             }),
@@ -319,6 +325,7 @@ impl EffectCommitGate {
         if !inner.issued_operations.insert(request.operation_id) {
             return Err(EffectGateError::DuplicateOperation);
         }
+        inner.pending_operations.insert(request.operation_id);
 
         Ok(EffectCommitPermit {
             gate_id: self.gate_id,
@@ -366,6 +373,9 @@ impl EffectCommitGate {
                 requested: permit.authority_epoch,
             });
         }
+        if !inner.pending_operations.remove(&permit.operation_id) {
+            return Err(EffectGateError::PermitInvalidated);
+        }
         if !inner.unknown_operations.is_empty() {
             return Err(EffectGateError::UnknownOutcomeOutstanding);
         }
@@ -378,6 +388,9 @@ impl EffectCommitGate {
             inner
                 .unknown_operations
                 .insert(permit.operation_id, *evidence_digest);
+            // Any other permit prepared before the ambiguous dispatch is now
+            // stale. Reconciliation must be followed by fresh admission.
+            inner.pending_operations.clear();
         }
         let receipt = EffectCommitReceipt {
             operation_id: permit.operation_id,
@@ -426,6 +439,7 @@ impl EffectCommitGate {
         }
 
         let previous_epoch = inner.authority_epoch;
+        inner.pending_operations.clear();
         inner.authority_epoch = revoked_epoch;
         inner.phase = GatePhase::Revoked {
             previous_epoch,
@@ -461,6 +475,7 @@ impl EffectCommitGate {
         }
 
         let previous_epoch = inner.authority_epoch;
+        inner.pending_operations.clear();
         inner.authority_epoch = active_epoch;
         inner.phase = GatePhase::Active;
 
@@ -534,6 +549,7 @@ impl EffectCommitGate {
             authority_epoch: inner.authority_epoch,
             active: matches!(inner.phase, GatePhase::Active),
             issued_operations: inner.issued_operations.len(),
+            pending_operations: inner.pending_operations.len(),
             unresolved_unknown_operations: inner.unknown_operations.len(),
         })
     }
@@ -667,6 +683,51 @@ mod tests {
     }
 
     #[test]
+    fn unknown_invalidates_all_previously_prepared_permits() {
+        let gate = gate();
+        let first = gate
+            .prepare_after_admission(request(16))
+            .unwrap_or_else(|error| panic!("first permit failed: {error:?}"));
+        let second = gate
+            .prepare_after_admission(request(17))
+            .unwrap_or_else(|error| panic!("second permit failed: {error:?}"));
+
+        let unknown = gate
+            .commit(first, || EffectExecution::<()>::Unknown {
+                evidence_digest: [21; 32],
+            })
+            .unwrap_or_else(|error| panic!("first commit failed: {error:?}"));
+        assert!(matches!(unknown.execution, EffectExecution::Unknown { .. }));
+
+        assert_eq!(
+            gate.commit(second, || EffectExecution::Committed {
+                value: (),
+                evidence_digest: [22; 32],
+            }),
+            Err(EffectGateError::UnknownOutcomeOutstanding)
+        );
+        gate.reconcile_unknown(
+            [16; 16],
+            EffectReconciliationOutcome::NotCommitted,
+            [23; 32],
+        )
+        .unwrap_or_else(|error| panic!("reconciliation failed: {error:?}"));
+        assert_eq!(
+            gate.commit(second, || EffectExecution::Committed {
+                value: (),
+                evidence_digest: [24; 32],
+            }),
+            Err(EffectGateError::PermitInvalidated)
+        );
+        assert_eq!(
+            gate.prepare_after_admission(request(18))
+                .unwrap_or_else(|error| panic!("fresh permit failed: {error:?}"))
+                .operation_id,
+            [18; 16]
+        );
+    }
+
+    #[test]
     fn one_operation_id_cannot_receive_two_permits() {
         let gate = gate();
         let _permit = gate
@@ -762,6 +823,13 @@ mod tests {
             1
         );
 
+        // A permit prepared before the UNKNOWN result is invalidated even
+        // after reconciliation; callers must obtain a new one under current
+        // authority and intent.
+        let old_permit = gate
+            .prepare_after_admission(request(8))
+            .unwrap_err();
+        assert_eq!(old_permit, EffectGateError::UnknownOutcomeOutstanding);
         let reconciled = gate
             .reconcile_unknown(
                 [7; 16],
