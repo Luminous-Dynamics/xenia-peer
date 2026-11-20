@@ -75,7 +75,21 @@ The receiver accepts out-of-order fragments and only exposes a frame after:
 
 Exact duplicate fragments are idempotent. Conflicting duplicate bytes or metadata invalidate that frame. A frame is never decoder-visible in partial form.
 
-## 4. Strict resource and replay bounds
+## 4. Sender-side lazy fragment iterator
+
+The paired sender primitive is `FrameFragmentIter` in `frame_fragmentation.rs`. It:
+- validates the source `RawFrame` and permits only video/pixel formats;
+- binds session fingerprint, key epoch, frame ID, timestamp, dimensions and format;
+- computes the complete-frame BLAKE3 digest once;
+- validates the full-frame and fragment-count hard limits before yielding anything;
+- materializes one fragment payload `Vec` at a time from the borrowed source frame;
+- implements `ExactSizeIterator`, allowing a sender to track remaining fragments.
+
+The intended consumption pattern is streaming: request one fragment, schedule/write it, then request the next. Collecting the entire iterator into a vector is permitted by Rust's iterator API but forfeits the bounded extra-memory property. The iterator is not an async transport writer and does not itself enforce a yield between fragments; the sender scheduler must do that.
+
+`max_fragment_bytes` is passed explicitly. The fragmenter does not infer it from MTU. For a QUIC DATAGRAM profile, the caller must subtract the complete envelope/authentication overhead from the negotiated DATAGRAM size before constructing the iterator.
+
+## 5. Strict resource and replay bounds
 
 Hard maxima are enforced even if a caller supplies a larger configuration:
 
@@ -95,7 +109,7 @@ Incomplete frames expire using receiver-local monotonic ticks. Source-host times
 
 On rekey, all incomplete assemblies and terminal IDs from the previous epoch are cleared. The key epoch is part of the assembly identity because Xenia frame IDs may reset on rekey.
 
-## 5. Sender contract still required
+## 6. Sender/transport contract still required
 
 This receiver model does not prove sender preemption. The eventual sender must:
 
@@ -112,11 +126,12 @@ This receiver model does not prove sender preemption. The eventual sender must:
 
 For DATAGRAM, `max_fragment_bytes` must be computed from the negotiated `max_datagram_frame_size`, path/UDP payload ceiling and envelope overhead; it must not be set to the 64 KiB stream-fragment default. For streams, the application record framing is explicit because QUIC stream frame boundaries are not visible to the receiver.
 
-## 6. Adversarial corpus and tests
+## 7. Adversarial corpus and tests
 
 [frame-fragment-reassembly-v0.1.json](../../benchmarks/frame-fragment-reassembly-v0.1.json) contains 16 deterministic cases:
 
 - ordered and out-of-order completion;
+- lazy sender fragmentation, bounded per-fragment materialization and sender-to-receiver round trip;
 - exact duplicate idempotency;
 - conflicting duplicate and metadata attacks;
 - frame digest corruption;
@@ -129,9 +144,9 @@ For DATAGRAM, `max_fragment_bytes` must be computed from the negotiated `max_dat
 - abort and late-fragment replay;
 - overlong fragment and declared-size overflow.
 
-The source currently has 20 deterministic unit tests authored. No Rust test execution is claimed.
+The reassembler has 21 unit tests authored; the lazy sender fragmenter adds 11 more (32 total across the two modules). Tests cover out-of-order round trip, exact fragment counts, per-fragment size bounds, invalid source frames, unsupported formats, invalid dimensions and hard maximum frame size. No Rust test execution is claimed.
 
-## 7. Benchmark programme
+## 8. Benchmark programme
 
 Compare:
 1. one whole-frame write on a single ordered stream;
@@ -156,7 +171,7 @@ Report separately:
 
 Proposed targets remain hypotheses: control p99 <=75 ms under 90% media saturation on the qualified LAN profile, >=30% p99 improvement over the matched one-stream whole-frame baseline, <=5% matched-quality video goodput loss versus multistream whole-frame writes, zero incomplete frames presented, zero reassembly-cap violations and zero silent control loss. These are not measured results.
 
-## 8. Industry positioning and claim ceiling
+## 9. Industry positioning and claim ceiling
 
 Sunshine documents burst-induced packet loss when host emission exceeds the bottleneck path's drain rate, motivating a separate pacing/queueing measurement ([Sunshine troubleshooting](https://docs.lizardbyte.dev/projects/sunshine/v2026.214.224301/md_docs_2troubleshooting.html)). QUIC's stream and datagram mechanisms are primitives, not complete remote-session scheduling systems. Xenia's differentiator must be the measured combination of bounded non-preemptible work, codec-aware frame expiry, fairness, recipient-bound authority and effect-stage evidence—not fragmentation alone.
 
