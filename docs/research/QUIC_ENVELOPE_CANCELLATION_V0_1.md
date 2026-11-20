@@ -44,6 +44,7 @@ The same terminal flag moves with the send half when `QuicTransport::split` is c
 
 A timed-out/erroring `read_exact` can consume part of the four-byte length prefix or payload. The receiver now treats every envelope-read error/timeout as terminal:
 - the receive half records terminal state;
+- `RecvStream::stop(0)` notifies the peer to stop sending on that direction;
 - a subsequent receive returns `UnexpectedEof` immediately;
 - split receive halves retain that terminal state.
 
