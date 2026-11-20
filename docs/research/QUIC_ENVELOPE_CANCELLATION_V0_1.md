@@ -96,7 +96,7 @@ Those require operation IDs, transfer chunk receipts and the bounded fragmentati
 
 ## 8. Claim boundary
 
-**Authored:** cancellation-safe write loop, finish-on-send-error/timeout, terminal send/receive state, terminal state transfer through split, helper-level unit tests and synthetic workload corpus.
+**Authored:** cancellation-safe write loop, RAII send/receive guards that also handle outer future cancellation, finish/STOP_SENDING on incomplete operations, terminal state transfer through split, 10 helper-level unit tests and 12 synthetic workload cases.
 
 **Not yet validated:** Rust compilation, rustfmt, Clippy, unit-test execution, Iroh loopback fault injection, platform qualification, interoperability with old peers, or measured latency/throughput.
 
