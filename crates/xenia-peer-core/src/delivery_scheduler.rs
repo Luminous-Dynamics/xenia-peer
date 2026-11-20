@@ -276,6 +276,8 @@ pub enum SchedulerConfigError {
     CapacityTooLarge,
     /// A configured byte quantum is below the safe minimum for bounded selection work.
     QuantumTooSmall,
+    /// A configured byte quantum exceeds its lane's byte capacity.
+    QuantumExceedsLaneCapacity,
 }
 
 /// Explicit admission result. Coalescing and supersession are never silent.
@@ -437,6 +439,11 @@ impl DeliveryScheduler {
         {
             return Err(SchedulerConfigError::QuantumTooSmall);
         }
+        for class in DeliveryClass::ALL {
+            if config.quantum_bytes[class.index()] > config.limit(class).max_bytes {
+                return Err(SchedulerConfigError::QuantumExceedsLaneCapacity);
+            }
+        }
         let max_lane_bytes = config
             .limits()
             .iter()
@@ -596,6 +603,10 @@ impl DeliveryScheduler {
             let removed = queue.items.len();
             queue.items.clear();
             queue.bytes = 0;
+            self.deficits[DeliveryClass::Video.index()] = 0;
+            if self.cursor == DeliveryClass::Video.index() {
+                self.visit_active = false;
+            }
             self.known_video_references.clear();
             queue.push(item);
             self.last_video_frame_id = video_frame_id;
@@ -776,13 +787,31 @@ impl DeliveryScheduler {
         removed as usize
     }
 
-    /// Record an externally established decoder reference, for example after
-    /// a new session starts from a known keyframe. This is not a photon or
-    /// presentation acknowledgement.
-    pub fn set_initial_video_reference(&mut self, frame_id: u64) {
+    /// Install an externally established decoder reference, for example
+    /// after a new session/keyframe context is established.
+    ///
+    /// Any queued video from the previous decoder context is discarded,
+    /// because its reference chain cannot be assumed valid. The method resets
+    /// video-lane deficit state and returns the number of queued frames
+    /// discarded. This is not a photon or presentation acknowledgement.
+    pub fn set_initial_video_reference(&mut self, frame_id: u64) -> usize {
+        let index = DeliveryClass::Video.index();
+        let queue = &mut self.queues[index];
+        let removed = queue.items.len();
+        queue.items.clear();
+        queue.bytes = 0;
+        self.deficits[index] = 0;
+        if self.cursor == index {
+            self.visit_active = false;
+        }
+        self.stats.superseded_video = self
+            .stats
+            .superseded_video
+            .saturating_add(removed as u64);
         self.known_video_references.clear();
         self.known_video_references.push_back(frame_id);
         self.last_video_frame_id = Some(frame_id);
+        removed
     }
 
     /// Return a bounded snapshot of queue occupancy and local counters.
@@ -1516,6 +1545,46 @@ mod tests {
         assert_eq!(
             DeliveryScheduler::new(config).err(),
             Some(SchedulerConfigError::CapacityTooLarge)
+        );
+    }
+
+    #[test]
+    fn quantum_larger_than_lane_capacity_is_rejected() {
+        let mut config = SchedulerConfig::default();
+        config.control.max_bytes = MIN_QUANTUM_BYTES;
+        config.quantum_bytes[DeliveryClass::Control.index()] = MIN_QUANTUM_BYTES * 2;
+        assert_eq!(
+            DeliveryScheduler::new(config).err(),
+            Some(SchedulerConfigError::QuantumExceedsLaneCapacity)
+        );
+    }
+
+    #[test]
+    fn resetting_initial_video_reference_discards_old_queued_dependencies() {
+        let mut scheduler = new_scheduler(SchedulerConfig::default());
+        scheduler.set_initial_video_reference(10);
+        assert_eq!(
+            scheduler.enqueue(video(1, 11, Some(10), None), 0),
+            EnqueueDisposition::Accepted
+        );
+        assert_eq!(
+            scheduler.enqueue(video(2, 12, Some(11), None), 0),
+            EnqueueDisposition::Accepted
+        );
+
+        assert_eq!(scheduler.set_initial_video_reference(20), 2);
+        assert_eq!(
+            scheduler.snapshot().lanes[DeliveryClass::Video.index()].queued_items,
+            0
+        );
+        assert_eq!(scheduler.snapshot().stats.superseded_video, 2);
+        assert_eq!(
+            scheduler.enqueue(video(3, 21, Some(20), None), 0),
+            EnqueueDisposition::Accepted
+        );
+        assert_eq!(
+            scheduler.enqueue(video(4, 22, Some(11), None), 0),
+            EnqueueDisposition::Rejected(RejectReason::MissingVideoReference)
         );
     }
 
