@@ -275,6 +275,18 @@
         "local_stage_durations_reported_separately",
         "no_software_callback_claimed_as_photon_time"
       ]
+    },
+    {
+      "id": "AOI-013",
+      "name": "heterogeneous-packet-size-wdrr-service-accounting",
+      "workload": "64 queued items per lane; repeating 4/8/12/16 KiB cost pattern; unequal byte quanta; no expiry or queue drain during observation",
+      "expected": "scheduled_bytes_plus_current_deficit_equals_quantum_visits_per_lane",
+      "assert": [
+        "all-five-lanes-remain-backlogged",
+        "configured-quantum-not-clipped",
+        "service-accounting-identity-holds"
+      ],
+      "claim_ceiling": "scheduler byte-cost accounting only; not actual wire service, transport latency, or remote delivery"
     }
   ],
   "measurement_rules": {
