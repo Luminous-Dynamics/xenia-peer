@@ -1,0 +1,556 @@
+{
+  "schema_version": "xenia-benchmark-profile/v0.1",
+  "programme": "Xenia Release Qualification",
+  "prepared": "2026-11-16",
+  "status": "proposed_targets_not_measurements",
+  "scope": {
+    "repositories": [
+      "Luminous-Dynamics/xenia-peer",
+      "Luminous-Dynamics/xenia-wire"
+    ],
+    "product_boundary": "Consent-first remote-session infrastructure",
+    "release_stage": "Technical preview qualification"
+  },
+  "comparison_policy": {
+    "comparators": [
+      {
+        "name": "RustDesk OSS",
+        "focus": "Open-source self-hosting, direct-versus-relay behavior, deployment and supported platforms"
+      },
+      {
+        "name": "AnyDesk",
+        "focus": "Mature session permissions, authentication, encryption and on-premises operations"
+      },
+      {
+        "name": "TeamViewer",
+        "focus": "Enterprise identity, administration, policy and operational support"
+      },
+      {
+        "name": "Parsec",
+        "focus": "Interactive streaming latency, frame pacing, bitrate and visual quality"
+      },
+      {
+        "name": "MeshCentral",
+        "focus": "Self-hosted fleet administration, browser workflows, terminal and file access"
+      }
+    ],
+    "fair_comparison_required": true,
+    "controlled_variables": [
+      "host_and_client_hardware",
+      "display_resolution_and_refresh",
+      "codec_and_quality_target",
+      "content_corpus_digest",
+      "transport_and_direct_or_relay_mode",
+      "network_profile",
+      "test_duration",
+      "competitor_version_and_configuration"
+    ],
+    "report_percentiles": [
+      "p50",
+      "p95",
+      "p99",
+      "max"
+    ],
+    "do_not_claim_superiority_without_matched_runs": true
+  },
+  "corpus": [
+    {
+      "id": "static_ui_text",
+      "description": "Text editor, terminal and static high-contrast UI with small pointer movements",
+      "quality_priority": "Text legibility and edge fidelity"
+    },
+    {
+      "id": "scrolling_and_pointer",
+      "description": "Rapid scrolling, pointer motion, drag selection and window movement",
+      "quality_priority": "Freshness, frame pacing and input response"
+    },
+    {
+      "id": "high_motion",
+      "description": "Fixed high-motion video and animation sequence",
+      "quality_priority": "Temporal continuity and bounded latency"
+    },
+    {
+      "id": "mixed_desktop",
+      "description": "Alternating static UI, scrolling, video playback and window changes",
+      "quality_priority": "Balanced visual quality and responsiveness"
+    },
+    {
+      "id": "dark_scene",
+      "description": "Low-light gradients, dark UI and subtle color transitions",
+      "quality_priority": "Banding, color fidelity and compression artifacts"
+    }
+  ],
+  "network_profiles": [
+    {
+      "id": "lan_interactive",
+      "kind": "performance_target",
+      "network": {
+        "rtt_ms": {
+          "min": 1,
+          "max": 5
+        },
+        "jitter_ms": 2,
+        "packet_loss_fraction": 0,
+        "bandwidth_limit_mbps": null,
+        "reordering_fraction": 0
+      },
+      "media_target": {
+        "resolution": "1920x1080",
+        "fps_target": 60,
+        "displayed_fps_min": 57,
+        "codec": "H.264",
+        "average_bitrate_mbps_max": 15,
+        "quality_gate": "Independent visual-quality score must remain acceptable; bitrate target cannot override legibility",
+        "target_interpretation": "15 Mbps is a stretch target. Parsec vendor guidance recommends 30 Mbps host upload for 1080p60. Do not claim superiority until matched-quality runs on the same hardware, content and transport path."
+      },
+      "latency_targets": {
+        "frame_age_p95_ms_max": 60,
+        "input_to_photon_p95_ms_max": 80,
+        "direct_connect_to_first_authorized_frame_p95_ms_max": 5000,
+        "post_approval_to_first_authorized_frame_p95_ms_max": 1000
+      }
+    },
+    {
+      "id": "regional_interactive",
+      "kind": "performance_target",
+      "network": {
+        "rtt_ms": {
+          "min": 20,
+          "max": 30
+        },
+        "jitter_ms": 5,
+        "packet_loss_fraction": 0,
+        "bandwidth_limit_mbps": null,
+        "reordering_fraction": 0
+      },
+      "media_target": {
+        "resolution": "1920x1080",
+        "fps_target": 60,
+        "displayed_fps_min": 57,
+        "codec": "H.264",
+        "quality_gate": "Report frame pacing, bitrate and quality at matched visual settings"
+      },
+      "latency_targets": {
+        "input_to_photon_p95_ms_max": 120,
+        "control_message_delivery_p95_ms_max": 150
+      }
+    },
+    {
+      "id": "degraded_wan",
+      "kind": "resilience_target",
+      "network": {
+        "rtt_ms": {
+          "min": 80,
+          "max": 80
+        },
+        "jitter_ms": 20,
+        "packet_loss_fraction": 0.01,
+        "bandwidth_limit_mbps": 10,
+        "reordering_fraction": 0.002
+      },
+      "media_target": {
+        "resolution": "adaptive",
+        "fps_target": 30,
+        "displayed_fps_min": 20,
+        "codec": "H.264",
+        "quality_gate": "Graceful adaptation; stale video may be dropped, protected control may not be starved"
+      },
+      "latency_targets": {
+        "control_message_delivery_p95_ms_max": 250
+      },
+      "cross_traffic": {
+        "media_offered_load_fraction_min": 0.9,
+        "competing_flows": [
+          "Xenia video",
+          "independent long-lived TCP bulk flow"
+        ],
+        "fair_queue_reference_required": true,
+        "tcp_goodput_vs_fair_queue_reference_ratio_min": 0.8
+      },
+      "bandwidth_step_down": {
+        "initial_bandwidth_mbps": 30,
+        "target_bandwidth_mbps": 5,
+        "adaptation_convergence_seconds_max": 2,
+        "measure_queue_age_and_control_latency": true
+      }
+    },
+    {
+      "id": "constrained_link",
+      "kind": "resilience_target",
+      "network": {
+        "rtt_ms": {
+          "min": 100,
+          "max": 100
+        },
+        "jitter_ms": 30,
+        "packet_loss_fraction": 0.02,
+        "bandwidth_limit_mbps": 5,
+        "reordering_fraction": 0.005
+      },
+      "media_target": {
+        "resolution": "adaptive",
+        "fps_target": 15,
+        "displayed_fps_min": 8,
+        "codec": "H.264",
+        "quality_gate": "Reduced-rate viewing is acceptable; consent, revocation and control remain bounded and observable"
+      },
+      "latency_targets": {
+        "control_message_delivery_p95_ms_max": 300
+      }
+    },
+    {
+      "id": "long_session_soak",
+      "kind": "reliability_target",
+      "duration_hours_min": 24,
+      "network": {
+        "impairments": [
+          "short_disconnect",
+          "long_disconnect",
+          "packet_loss_burst",
+          "jitter_burst",
+          "bandwidth_throttle",
+          "peer_restart",
+          "transport_restart"
+        ]
+      },
+      "reliability_targets": {
+        "crash_count_max": 0,
+        "unbounded_queue_count_max": 0,
+        "nonce_or_replay_invariant_violations_max": 0,
+        "authority_drift_count_max": 0
+      },
+      "resource_targets": {
+        "rss_growth_after_warmup_percent_max": 5,
+        "note": "Measure after a documented warm-up and compare like-for-like; publish absolute RSS and allocation data too."
+      }
+    }
+  ],
+  "security_and_correctness_targets": [
+    {
+      "id": "aead_nonce_uniqueness",
+      "kind": "stress_test_plus_formal_obligation",
+      "minimum_distinct_key_nonce_pairs": 10000000,
+      "required_invariant": "No two distinct successful seals reuse the same AEAD key and 12-byte nonce.",
+      "note": "Stress count is not a proof; combine with model checking, source review and independent cryptographic review."
+    },
+    {
+      "id": "rekey_state_machine",
+      "kind": "fault_injection",
+      "minimum_scripted_rekeys": 100000,
+      "scenarios": [
+        "duplicate_ack",
+        "stale_key_ack",
+        "wrong_nonce_domain_ack",
+        "wrong_sequence_ack",
+        "delayed_message",
+        "reordered_message",
+        "disconnect_before_ack",
+        "disconnect_after_seal",
+        "restart_during_rekey",
+        "repeated_rekey"
+      ],
+      "false_acceptances_max": 0
+    },
+    {
+      "id": "consent_and_revocation",
+      "kind": "state_machine_and_race_test",
+      "scenarios": [
+        "deny",
+        "expiry",
+        "revocation_during_video",
+        "revocation_during_input",
+        "revocation_during_file_transfer",
+        "reconnect_after_revocation",
+        "restart_after_revocation",
+        "rekey_after_revocation",
+        "duplicate_or_reordered_authority_event"
+      ],
+      "protected_effects_after_denial_expiry_or_revocation_max": 0
+    },
+    {
+      "id": "randomized_fault_campaign",
+      "kind": "property_and_fault_injection",
+      "minimum_seeded_scenarios": 10000,
+      "scenarios": [
+        "partial_write",
+        "transport_timeout",
+        "process_termination",
+        "corrupt_persistence",
+        "truncated_ledger",
+        "slow_consumer",
+        "queue_saturation",
+        "peer_restart",
+        "stale_capability",
+        "replay"
+      ],
+      "silent_unauthorized_successes_max": 0
+    },
+    {
+      "id": "independent_conformance",
+      "kind": "cross_implementation",
+      "minimum_independent_implementations": 2,
+      "required_vector_classes": [
+        "positive",
+        "malformed",
+        "truncated",
+        "replay",
+        "wrong_domain",
+        "wrong_epoch",
+        "consent_transition",
+        "rekey_transition"
+      ],
+      "required_vector_pass_fraction": 1
+    }
+  ],
+  "consent_usability_targets": {
+    "minimum_formative_participants": 20,
+    "comprehension_fraction_min": 0.9,
+    "critical_comprehension_dimensions": [
+      "requester_and_recipient",
+      "purpose",
+      "data_and_operation_scope",
+      "duration_and_persistence",
+      "decline_consequences",
+      "revocation_and_limits"
+    ],
+    "deny_path_must_be_as_discoverable_as_approve": true,
+    "approval_rate_is_not_a_success_metric": true
+  },
+  "evidence_contract": {
+    "required_run_fields": [
+      "repository",
+      "commit_sha",
+      "dirty_tree",
+      "build_profile",
+      "rust_toolchain",
+      "os_kernel_compositor",
+      "cpu_gpu_driver",
+      "encoder_decoder",
+      "display_resolution_refresh",
+      "codec_profile",
+      "transport",
+      "direct_or_relay",
+      "network_profile",
+      "corpus_digest",
+      "warmup_duration",
+      "sample_count",
+      "measurement_clock",
+      "percentile_results",
+      "failure_counts",
+      "recovery_measurements",
+      "harness_version",
+      "random_seed",
+      "raw_artifact_digest"
+    ],
+    "allowed_result_states": [
+      "PASS",
+      "FAIL",
+      "BLOCKED",
+      "ENVIRONMENT_FAILURE"
+    ],
+    "missing_measurements_are_not_zero": true,
+    "queued_skipped_cancelled_or_stale_ci_is_not_pass": true,
+    "comparison_requires_matched_configuration": true,
+    "required_physical_latency_trace_roles": [
+      "physical_latency_trace",
+      "instrument_calibration"
+    ]
+  },
+  "references": {
+    "rustdesk": "https://rustdesk.com/docs/en/self-host/",
+    "anydesk": "https://anydesk.com/en/security",
+    "teamviewer": "https://www.teamviewer.com/en/trust-center/",
+    "parsec": "https://support.parsec.app/hc/en-us/articles/32381460716180-Parsec-Connectivity-Requirements",
+    "meshcentral": "https://docs.meshcentral.com/",
+    "kani": "https://model-checking.github.io/kani/",
+    "criterion": "https://criterion-rs.github.io/book/"
+  },
+  "competitor_reference_points": [
+    {
+      "system": "Parsec",
+      "observed_reference": "30 Mbps host upload recommended by vendor for 1080p60",
+      "source": "https://support.parsec.app/hc/en-us/articles/32381460716180-Parsec-Connectivity-Requirements",
+      "published_or_updated": "2026-07-08",
+      "comparison_rule": "Reference only; run matched visual quality, codec, hardware, network and direct/relay configuration."
+    },
+    {
+      "system": "RustDesk",
+      "observed_reference": "Codec configuration lists auto, VP8, VP9, AV1, H.264 and H.265; vendor warns codec availability depends on host/client support.",
+      "source": "https://rustdesk.com/docs/en/self-host/client-configuration/advanced-settings/",
+      "comparison_rule": "Record actual negotiated codec and hardware path; configured preference is not proof of negotiated use."
+    },
+    {
+      "system": "AnyDesk",
+      "observed_reference": "Permission profiles and in-session permission changes are documented.",
+      "source": "https://anydesk.com/en/features/permission-management",
+      "comparison_rule": "Compare scope clarity, revocation/effect-boundary enforcement and verifiability, not merely presence of permission toggles."
+    },
+    {
+      "system": "TeamViewer Tensor",
+      "observed_reference": "Vendor documents session and management-console event logs with user/action/time scope.",
+      "source": "https://www.teamviewer.com/en/global/support/knowledge-base/teamviewer-tensor/security/auditability-event-log/",
+      "comparison_rule": "Compare administrator-accessible audit logs with participant-verifiable, cryptographically bound operation evidence."
+    },
+    {
+      "system": "Sunshine",
+      "observed_reference": "Vendor documents hardware-dependent HEVC Main/Main10 and AV1 Main encoding options.",
+      "source": "https://docs.lizardbyte.dev/projects/sunshine/latest/md_docs_2configuration.html",
+      "comparison_rule": "Record codec/profile, hardware encoder availability, capture backend, bit depth and HDR state."
+    },
+    {
+      "system": "MeshCentral",
+      "observed_reference": "Self-hosted web management with remote desktop, terminal and file management.",
+      "source": "https://docs.meshcentral.com/",
+      "comparison_rule": "Compare administration and fleet workflows, self-host operation, offline behavior and authority evidence."
+    }
+  ],
+  "codec_and_congestion_experiments": {
+    "bitrate_sweep_mbps": [
+      5,
+      10,
+      15,
+      20,
+      25,
+      30
+    ],
+    "codec_matrix": [
+      "H.264",
+      "HEVC",
+      "AV1",
+      "passthrough",
+      "HDC"
+    ],
+    "matched_quality_required": true,
+    "record_hardware_or_software_encode_decode": true,
+    "record_chroma_bit_depth_hdr_capture_backend": true,
+    "experiments": [
+      {
+        "id": "media_control_isolation",
+        "offered_media_load_fraction_min": 0.9,
+        "add_competing_long_lived_tcp_flow": true,
+        "measure": [
+          "control_message_p95_under_media_saturation_ms",
+          "control_message_p95_under_tcp_cross_traffic_ms",
+          "input_event_p95_ms",
+          "queue_age_p95_ms",
+          "stale_media_drops",
+          "tcp_goodput_vs_fq_reference_ratio"
+        ],
+        "acceptance": "No protected control/input starvation; bounded queues; long-lived TCP goodput at least 80% of the same-bottleneck fair-queue reference."
+      },
+      {
+        "id": "network_step_down",
+        "initial_bandwidth_mbps": 30,
+        "target_bandwidth_mbps": 5,
+        "rtt_ms": 80,
+        "jitter_ms": 20,
+        "packet_loss_fraction": 0.01,
+        "adaptation_convergence_seconds_max": 2,
+        "measure": [
+          "adaptation_convergence_seconds",
+          "time_to_stable_bitrate_s",
+          "time_to_stable_fps_s",
+          "queue_age_p95_ms",
+          "control_message_delivery_p95_ms",
+          "stale_media_drops",
+          "recovery_time_s"
+        ]
+      }
+    ],
+    "reference_standard": "RFC 8836",
+    "reference_url": "https://www.rfc-editor.org/rfc/rfc8836.html",
+    "status": "proposed_experiments_not_measurements"
+  },
+  "input_to_photon_evidence_contract": {
+    "required_for_profiles": [
+      "lan_interactive",
+      "regional_interactive"
+    ],
+    "valid_methods": [
+      "photodiode",
+      "high_speed_camera"
+    ],
+    "minimum_valid_trials": 300,
+    "preferred_trials": 1000,
+    "require_calibration": true,
+    "require_event_id_join": true,
+    "require_bound_raw_trace_artifact": true,
+    "require_bound_calibration_artifact": true,
+    "photodiode": {
+      "maximum_timer_resolution_ns": 1000,
+      "minimum_sensor_bandwidth_hz": 10000
+    },
+    "high_speed_camera": {
+      "minimum_frame_rate_fps": 1000
+    },
+    "invalid_substitutes": [
+      "host ACK",
+      "decoder completion callback",
+      "browser requestAnimationFrame callback",
+      "compositor present submission",
+      "unsynchronized cross-host wall-clock subtraction"
+    ],
+    "reference": "NVIDIA LDAT and equivalent photodiode/high-speed-camera methods",
+    "status": "proposed_measurement_contract_not_measurements"
+  },
+  "pqc_handshake_benchmark": {
+    "id": "hybrid_pqc_handshake_cost",
+    "current_reference_dependencies": {
+      "ml_kem": "0.3.0-rc.2",
+      "ml_dsa": "0.1.1",
+      "classical_signature": "ed25519-dalek 2.x",
+      "note": "These are the versions currently pinned in xenia-peer/xenia-wire; update the inventory when exact manifests/lockfile change."
+    },
+    "candidate_dependencies_to_evaluate": {
+      "ml_kem": "0.3.4",
+      "ml_dsa": "0.1.2",
+      "status": "candidate_not_adopted"
+    },
+    "algorithms": [
+      "ML-KEM-768",
+      "ML-DSA-65",
+      "Ed25519"
+    ],
+    "implementations": [
+      "native",
+      "wasm32-unknown-unknown"
+    ],
+    "operations": [
+      "ml_kem_768_keygen",
+      "ml_kem_768_encapsulate",
+      "ml_kem_768_decapsulate",
+      "ml_dsa_65_sign",
+      "ml_dsa_65_verify",
+      "hybrid_handshake_complete",
+      "hybrid_rekey_ack_roundtrip"
+    ],
+    "required_measurements": [
+      "p50_us",
+      "p95_us",
+      "p99_us",
+      "max_us",
+      "public_key_bytes",
+      "signature_bytes",
+      "ciphertext_bytes",
+      "transcript_bytes",
+      "peak_memory_bytes",
+      "allocation_count",
+      "wasm_binary_bytes",
+      "cold_start_ms"
+    ],
+    "comparison_policy": {
+      "matched_toolchain_and_hardware": true,
+      "preserve_exact_native_wasm_transcript_compatibility": true,
+      "require_fips_203_204_vectors": true,
+      "require_malformed_input_and_fuzz_results": true,
+      "no_perf_claim_without_reproducible_baseline": true,
+      "no_release_admission_without_independent_review": true
+    },
+    "security_note": "Current RustCrypto ML-KEM and ML-DSA crate documentation states the implementations have not been independently audited. Stable crate versions do not imply audited security.",
+    "references": {
+      "ml_kem": "https://docs.rs/crate/ml-kem/latest",
+      "ml_dsa": "https://docs.rs/ml-dsa/latest/ml_dsa/"
+    },
+    "status": "proposed_benchmark_not_measurement"
+  }
+}

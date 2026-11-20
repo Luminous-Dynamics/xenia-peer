@@ -1,6 +1,7 @@
 [package]
 name = "xenia-peer"
 version.workspace = true
+default-run = "xenia-peer"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
