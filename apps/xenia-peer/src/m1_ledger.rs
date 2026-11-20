@@ -54,7 +54,13 @@ pub(crate) fn disposition_for_m1_event(event: M1AuditEvent) -> M1LedgerDispositi
         | M1AuditEvent::FileReceivePermissionAdmitted
         | M1AuditEvent::InputPlatformAccepted
         | M1AuditEvent::InputOutcomeUnknown
-        | M1AuditEvent::InputNotAttempted => {
+        | M1AuditEvent::InputNotAttempted
+        | M1AuditEvent::HostClipboardReadCompleted
+        | M1AuditEvent::HostClipboardReadOutcomeUnknown
+        | M1AuditEvent::HostClipboardReadNotAttempted
+        | M1AuditEvent::HostClipboardWriteApplied
+        | M1AuditEvent::HostClipboardWriteOutcomeUnknown
+        | M1AuditEvent::HostClipboardWriteNotAttempted => {
             M1LedgerDisposition::Skip(M1LedgerSkipReason::NotConsentBoundary)
         }
         M1AuditEvent::SessionEnded => {
@@ -150,6 +156,24 @@ mod tests {
                 event,
             )
             .is_none());
+        }
+    }
+
+    #[test]
+    fn clipboard_effect_outcomes_remain_outside_consent_journal() {
+        let events = [
+            M1AuditEvent::HostClipboardReadCompleted,
+            M1AuditEvent::HostClipboardReadOutcomeUnknown,
+            M1AuditEvent::HostClipboardReadNotAttempted,
+            M1AuditEvent::HostClipboardWriteApplied,
+            M1AuditEvent::HostClipboardWriteOutcomeUnknown,
+            M1AuditEvent::HostClipboardWriteNotAttempted,
+        ];
+        for event in events {
+            assert_eq!(
+                disposition_for_m1_event(event),
+                M1LedgerDisposition::Skip(M1LedgerSkipReason::NotConsentBoundary)
+            );
         }
     }
 
