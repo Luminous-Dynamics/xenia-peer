@@ -42,7 +42,7 @@ The gate does **not** validate the signatures/truth of the authority inputs. It 
 
 The closure must return one of:
 - `Committed`: effect owner crossed its defined local commit point;
-- `Rejected`: effect owner can prove the operation was rejected before commit;
+- `NotCommitted`: effect owner was invoked and can prove its local commit point was not crossed;
 - `Unknown`: invocation happened, but the commit result is ambiguous.
 
 The returned receipt binds operation ID, session fingerprint, M1 lane, direction, context digest and authority epoch. The caller can append the receipt to the stage-accurate operation evidence ledger under #510.
