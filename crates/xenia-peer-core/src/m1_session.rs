@@ -406,39 +406,40 @@ impl M1SessionMachine {
         Ok(())
     }
 
-    /// Record that one input event was allowed through the reverse path.
+    /// Admit permission for one reverse-path input effect. The platform
+    /// injector result is appended separately by the effect owner.
     pub fn inject_input(&mut self) -> Result<(), M1SessionError> {
         self.require_active(M1Permission::InjectInput)?;
         self.audit.push(M1AuditEvent::InputPermissionAdmitted);
         Ok(())
     }
 
-    /// Record that host clipboard contents were disclosed to the viewer on
-    /// the forward path.
+    /// Admit permission for host clipboard disclosure on the forward path.
+    /// The actual read and transport send are recorded separately.
     pub fn read_host_clipboard(&mut self) -> Result<(), M1SessionError> {
         self.require_active(M1Permission::ReadHostClipboard)?;
         self.audit.push(M1AuditEvent::HostClipboardReadPermissionAdmitted);
         Ok(())
     }
 
-    /// Record that one viewer-originated clipboard update was applied to
-    /// the host clipboard on the reverse path.
+    /// Admit permission for a viewer-originated host clipboard write.
+    /// The actual OS clipboard result is recorded separately.
     pub fn write_host_clipboard(&mut self) -> Result<(), M1SessionError> {
         self.require_active(M1Permission::WriteHostClipboard)?;
         self.audit.push(M1AuditEvent::HostClipboardWritePermissionAdmitted);
         Ok(())
     }
 
-    /// Record that one chunk of a host-initiated (forward-path) file
-    /// transfer was allowed through.
+    /// Admit permission for a host-initiated (forward-path) file transfer.
+    /// Chunk reads/sends and peer verification are recorded separately.
     pub fn send_file_to_viewer(&mut self) -> Result<(), M1SessionError> {
         self.require_active(M1Permission::SendFileToViewer)?;
         self.audit.push(M1AuditEvent::FileSendPermissionAdmitted);
         Ok(())
     }
 
-    /// Record that one chunk of a viewer-initiated (reverse-path) file
-    /// transfer was allowed through.
+    /// Admit permission for a viewer-initiated (reverse-path) file transfer.
+    /// Chunk staging and verified publication are recorded separately.
     pub fn receive_file_from_viewer(&mut self) -> Result<(), M1SessionError> {
         self.require_active(M1Permission::ReceiveFileFromViewer)?;
         self.audit.push(M1AuditEvent::FileReceivePermissionAdmitted);
