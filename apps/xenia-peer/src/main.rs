@@ -6579,14 +6579,45 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         warn!("ignoring viewer clipboard update: --clipboard is not bidirectional");
                         continue;
                     }
-                    {
+                    let clipboard_bytes = match &clipboard.content {
+                        ClipboardContent::Text(text) => text.len(),
+                        ClipboardContent::Cleared => 0,
+                    };
+                    let clipboard_kind = match &clipboard.content {
+                        ClipboardContent::Text(_) => "text",
+                        ClipboardContent::Cleared => "cleared",
+                    };
+                    let write_execution = {
                         let mut m1_runtime = m1_runtime.lock().await;
-                        if let Err(err) = m1_runtime.allow_host_clipboard_write_flow() {
-                            warn!(error = %err, "clipboard update rejected by M1 consent gate");
-                            continue;
+                        m1_runtime.with_host_clipboard_write_effect(|| {
+                            apply_clipboard_content(&clipboard.content)
+                        })
+                    }?;
+                    match write_execution {
+                        crate::m1_runtime::HostClipboardWriteExecution::Applied => {
+                            info!(
+                                clipboard_kind,
+                                bytes = clipboard_bytes,
+                                "host clipboard API accepted viewer update"
+                            );
+                        }
+                        crate::m1_runtime::HostClipboardWriteExecution::NotAttempted(reason) => {
+                            warn!(
+                                reason,
+                                clipboard_kind,
+                                bytes = clipboard_bytes,
+                                "host clipboard update was not attempted"
+                            );
+                        }
+                        crate::m1_runtime::HostClipboardWriteExecution::OutcomeUnknown(error) => {
+                            warn!(
+                                error,
+                                clipboard_kind,
+                                bytes = clipboard_bytes,
+                                "host clipboard write returned an uncertain outcome"
+                            );
                         }
                     }
-                    apply_clipboard_content(&clipboard.content);
                     continue;
                 }
 
