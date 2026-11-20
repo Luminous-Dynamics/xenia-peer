@@ -1021,7 +1021,7 @@ impl M1RuntimeSession {
         self.flush_new_audit_events()
     }
 
-    pub(crate) fn inject_input(&mut self) -> Result<(), M1RuntimeError> {
+    pub(crate) fn admit_input(&mut self) -> Result<(), M1RuntimeError> {
         self.session.inject_input()?;
         self.flush_new_audit_events()
     }
@@ -1103,7 +1103,7 @@ impl M1RuntimeSession {
     }
 
     pub(crate) fn allow_input_flow(&mut self) -> Result<(), M1RuntimeError> {
-        self.inject_input()
+        self.admit_input()
     }
 
     pub(crate) fn allow_host_clipboard_read_flow(&mut self) -> Result<(), M1RuntimeError> {
@@ -1948,7 +1948,7 @@ mod tests {
         runtime.offer().unwrap();
         runtime.grant_consent().unwrap();
         runtime.stream_frame().unwrap();
-        runtime.inject_input().unwrap();
+        runtime.admit_input().unwrap();
         runtime.revoke().unwrap();
 
         assert_eq!(runtime.state(), M1SessionState::Revoked);
@@ -2612,7 +2612,7 @@ mod tests {
 
         let before_ops = runtime.entries().len();
         runtime.stream_frame().unwrap();
-        runtime.inject_input().unwrap();
+        runtime.admit_input().unwrap();
         let after_ops = runtime.entries().len();
 
         assert_eq!(before_ops, 2);
