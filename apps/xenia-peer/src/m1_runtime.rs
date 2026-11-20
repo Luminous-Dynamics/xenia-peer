@@ -1033,7 +1033,7 @@ impl M1RuntimeSession {
                 M1InputEffectOutcome::OutcomeUnknown
             }
         };
-        self.session.record_input_effect_outcome(outcome);
+        self.session.record_input_effect_outcome(outcome)?;
         self.flush_new_audit_events()?;
         Ok(result)
     }
