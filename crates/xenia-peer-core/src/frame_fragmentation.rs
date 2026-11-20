@@ -326,6 +326,31 @@ mod tests {
     }
 
     #[test]
+    fn zero_dimensions_are_rejected() {
+        let frame = RawFrame::encoded(
+            51,
+            1,
+            0,
+            720,
+            PixelFormat::H264,
+            vec![1, 2, 3],
+        );
+        assert_eq!(
+            FrameFragmentIter::new(&frame, [1; 32], 1, 2).err(),
+            Some(FrameFragmentationError::InvalidDimensions)
+        );
+    }
+
+    #[test]
+    fn hard_maximum_frame_size_is_enforced() {
+        let frame = encoded_frame(52, vec![1; DEFAULT_MAX_FRAME_BYTES + 1]);
+        assert_eq!(
+            FrameFragmentIter::new(&frame, [1; 32], 1, DEFAULT_MAX_FRAGMENT_BYTES).err(),
+            Some(FrameFragmentationError::FrameTooLarge)
+        );
+    }
+
+    #[test]
     fn empty_frame_is_rejected() {
         let frame = encoded_frame(49, Vec::new());
         assert_eq!(
