@@ -204,14 +204,17 @@ Configuration rejects zero capacities, zero age budgets, lane capacities above 6
 
 **Important scheduling boundary:** this model selects whole work items. WDRR byte accounting does not preempt a large send after the caller starts writing it. A whole 4–16 MiB frame or file chunk can still create non-preemptible sender blocking, depending on the transport writer. A bounded, frame-safe fragmentation/preemption contract is tracked separately in [#529](https://github.com/Luminous-Dynamics/xenia-peer/issues/529). Do not infer an end-to-end control p99 guarantee from this queue model alone.
 
-Unit tests are authored for control ordering/full-queue behavior, audio/video sequence monotonicity, telemetry coalescing, keyframe dependency resets, known-unsent dependency invalidation, stale reference chains, audio deadlines, bulk retention, byte-deficit service across classes, queue bounds, and invalid configuration. **They have not yet been executed**: this authoring environment has no Rust toolchain, and hosted CI is not treated as evidence while queued. The branch contains no runtime transport integration and claims no measured performance or safety qualification.
+Unit tests are authored for control ordering/full-queue behavior, audio/video sequence monotonicity, telemetry coalescing, keyframe dependency resets, known-unsent dependency invalidation, stale reference chains, audio deadlines, bulk retention, byte-deficit service across classes, queue bounds, and invalid configuration.
+
+An integration-test simulator now compares three policies over a deterministic, heterogeneous, preloaded backlog: global FIFO, per-class item round robin, and the actual `DeliveryScheduler` WDRR implementation. It uses one byte of service work per synthetic tick and reports completion in byte-time units. Tests require every policy to complete the same total work and require WDRR to improve control-tail completion against both references on this exact workload. These are regression assertions, not real-time milliseconds or network-performance results. Static item-weighted service, deadline/AoI scheduling and an offline oracle remain additional future candidates. **They have not yet been executed**: this authoring environment has no Rust toolchain, and hosted CI is not treated as evidence while queued. The branch contains no runtime transport integration and claims no measured performance or safety qualification.
 
 ## 11. Delivery plan
 
 1. Run the authored Rust unit tests and Clippy/format checks on the exact branch head when an available local or hosted toolchain permits.
-2. Add a deterministic simulator that compares FIFO, static item-weighted service, WDRR and deadline/AoI-aware selection against the 12 synthetic adversarial workloads.
+2. Extend the deterministic FIFO/item-round-robin/WDRR simulator with static item-weighted service, deadlines, packet expiry, fairness bounds, queue pressure and policy ablations from the 12-case corpus.
 3. Replay the resulting scheduler policies through the #458 endpoint-stage telemetry and #457 calibrated physical I2P adapters.
-4. Integrate behind a negotiated multi-stream profile only after baseline semantics and exact-head evidence are frozen.
-5. Compare Parsec, RustDesk, Sunshine/Moonlight and RDP under #465's matched measurement methodology.
+4. Qualify bounded fragment/preemption semantics under #529 before connecting WDRR to large live video/file writes.
+5. Integrate behind a negotiated multi-stream profile only after baseline semantics and exact-head evidence are frozen.
+6. Compare Parsec, RustDesk, Sunshine/Moonlight and RDP under #465's matched measurement methodology.
 
-**Current evidence state:** pure Rust policy model and deterministic unit tests are committed to the draft branch; no Rust test execution, CI pass, hardware result, external product comparison, live transport integration, or production qualification is claimed.
+**Current evidence state:** pure Rust policy model, deterministic unit tests and a synthetic comparison harness are committed to the draft branch; no Rust test execution, CI pass, hardware result, external product comparison, live transport integration, or production qualification is claimed.
