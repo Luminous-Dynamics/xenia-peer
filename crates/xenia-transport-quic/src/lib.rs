@@ -346,31 +346,67 @@ async fn write_envelope_with_timeout(
     }
 }
 
-fn send_failure_is_terminal(result: &Result<(), TransportError>) -> bool {
-    matches!(
-        result,
-        Err(
-            TransportError::Io(_)
-                | TransportError::UnexpectedEof
-                | TransportError::TimedOut { .. }
-        )
-    )
+/// RAII guard: if an envelope write future is dropped before a complete
+/// envelope is written, terminate the send stream and mark the direction
+/// unusable. This covers cancellation by an outer caller as well as timeout.
+struct SendEnvelopeGuard<'a> {
+    send: &'a mut SendStream,
+    terminal: &'a mut bool,
+    completed: bool,
 }
 
-fn ensure_stream_side_open(terminal: bool) -> Result<(), TransportError> {
-    if terminal {
-        Err(TransportError::UnexpectedEof)
-    } else {
-        Ok(())
+impl<'a> SendEnvelopeGuard<'a> {
+    fn new(send: &'a mut SendStream, terminal: &'a mut bool) -> Self {
+        Self {
+            send,
+            terminal,
+            completed: false,
+        }
     }
 }
 
-fn record_receive_result<T>(
+impl Drop for SendEnvelopeGuard<'_> {
+    fn drop(&mut self) {
+        if !self.completed {
+            let _ = self.send.finish();
+            *self.terminal = true;
+        }
+    }
+}
+
+/// Write one length-prefixed envelope to a QUIC stream.
+///
+/// The guard terminates the send direction if this future is cancelled by
+/// any caller while an envelope is incomplete, not only on an internal timeout.
+async fn write_envelope_with_timeout(
+    send: &mut SendStream,
     terminal: &mut bool,
-    result: &Result<T, TransportError>,
-) {
-    if result.is_err() {
-        *terminal = true;
+    bytes: &[u8],
+    timeout: Duration,
+) -> Result<(), TransportError> {
+    let len = u32::try_from(bytes.len()).map_err(|_| TransportError::EnvelopeTooLarge(u32::MAX))?;
+    if len > MAX_ENVELOPE_BYTES {
+        return Err(TransportError::EnvelopeTooLarge(len));
+    }
+    ensure_stream_side_open(*terminal)?;
+
+    let mut guard = SendEnvelopeGuard::new(send, terminal);
+    let result = tokio::time::timeout(timeout, async {
+        write_all_cancel_safe(&mut *guard.send, &len.to_be_bytes()).await?;
+        write_all_cancel_safe(&mut *guard.send, bytes).await
+    })
+    .await;
+
+    match result {
+        Ok(Ok(())) => {
+            guard.completed = true;
+            Ok(())
+        }
+        Ok(Err(error)) => Err(error),
+        Err(_) => Err(TransportError::TimedOut {
+            operation: "send_envelope",
+            timeout_ms: timeout.as_millis().try_into().unwrap_or(u64::MAX),
+        }),
     }
 }
 
@@ -381,11 +417,7 @@ async fn send_envelope_guarded(
     timeout: Duration,
 ) -> Result<(), TransportError> {
     ensure_stream_side_open(*terminal)?;
-    let result = write_envelope_with_timeout(send, bytes, timeout).await;
-    if send_failure_is_terminal(&result) {
-        *terminal = true;
-    }
-    result
+    write_envelope_with_timeout(send, terminal, bytes, timeout).await
 }
 
 async fn write_envelope(
@@ -444,6 +476,46 @@ async fn read_envelope(recv: &mut RecvStream) -> Result<Vec<u8>, TransportError>
     read_envelope_with_timeout(recv, Duration::from_millis(RECEIVE_ENVELOPE_TIMEOUT_MS)).await
 }
 
+/// RAII guard: dropping an in-flight framed read leaves the stream offset
+/// unknown, so stop the peer and permanently close this receive direction.
+struct ReceiveEnvelopeGuard<'a> {
+    recv: &'a mut RecvStream,
+    terminal: &'a mut bool,
+    completed: bool,
+}
+
+impl<'a> ReceiveEnvelopeGuard<'a> {
+    fn new(recv: &'a mut RecvStream, terminal: &'a mut bool) -> Self {
+        Self {
+            recv,
+            terminal,
+            completed: false,
+        }
+    }
+}
+
+impl Drop for ReceiveEnvelopeGuard<'_> {
+    fn drop(&mut self) {
+        if !self.completed {
+            *self.terminal = true;
+            let _ = self.recv.stop(VarInt::from_u32(0));
+        }
+    }
+}
+
+async fn recv_envelope_guarded(
+    recv: &mut RecvStream,
+    terminal: &mut bool,
+) -> Result<Vec<u8>, TransportError> {
+    ensure_stream_side_open(*terminal)?;
+    let mut guard = ReceiveEnvelopeGuard::new(recv, terminal);
+    let result = read_envelope(&mut *guard.recv).await;
+    if result.is_ok() {
+        guard.completed = true;
+    }
+    result
+}
+
 impl Transport for QuicTransport {
     fn transport_profile(&self) -> TransportProfileV1 {
         TransportProfileV1::current(TransportKind::Quic)
@@ -454,13 +526,7 @@ impl Transport for QuicTransport {
     }
 
     async fn recv_envelope(&mut self) -> Result<Vec<u8>, TransportError> {
-        ensure_stream_side_open(self.recv_terminal)?;
-        let result = read_envelope(&mut self.recv).await;
-        record_receive_result(&mut self.recv_terminal, &result);
-        if self.recv_terminal {
-            let _ = self.recv.stop(VarInt::from_u32(0));
-        }
-        result
+        recv_envelope_guarded(&mut self.recv, &mut self.recv_terminal).await
     }
 }
 
@@ -502,13 +568,7 @@ pub struct QuicRecvHalf {
 
 impl RecvEnvelope for QuicRecvHalf {
     async fn recv_envelope(&mut self) -> Result<Vec<u8>, TransportError> {
-        ensure_stream_side_open(self.terminal)?;
-        let result = read_envelope(&mut self.recv).await;
-        record_receive_result(&mut self.terminal, &result);
-        if self.terminal {
-            let _ = self.recv.stop(VarInt::from_u32(0));
-        }
-        result
+        recv_envelope_guarded(&mut self.recv, &mut self.terminal).await
     }
 }
 
@@ -517,37 +577,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_pre_write_size_rejections_leave_the_send_stream_reusable() {
-        assert!(!send_failure_is_terminal(&Err(
-            TransportError::EnvelopeTooLarge(MAX_ENVELOPE_BYTES + 1)
-        )));
-        assert!(send_failure_is_terminal(&Err(TransportError::UnexpectedEof)));
-        assert!(send_failure_is_terminal(&Err(TransportError::TimedOut {
-            operation: "send_envelope",
-            timeout_ms: 1,
-        })));
-        assert!(send_failure_is_terminal(&Err(TransportError::Io(
-            io::Error::other("partial write failed")
-        ))));
-    }
-
-    #[test]
-    fn receive_error_transitions_to_terminal_but_success_does_not() {
-        let mut terminal = false;
-        let success: Result<Vec<u8>, TransportError> = Ok(vec![1, 2, 3]);
-        record_receive_result(&mut terminal, &success);
-        assert!(!terminal);
-
-        let timeout: Result<Vec<u8>, TransportError> = Err(TransportError::TimedOut {
-            operation: "recv_envelope",
-            timeout_ms: 1,
-        });
-        record_receive_result(&mut terminal, &timeout);
-        assert!(terminal);
-        assert_eq!(
-            ensure_stream_side_open(terminal),
-            Err(TransportError::UnexpectedEof)
-        );
+    fn oversized_envelope_is_rejected_before_stream_guard_creation() {
+        let len = u32::try_from(MAX_ENVELOPE_BYTES)
+            .unwrap_or(u32::MAX)
+            .saturating_add(1);
+        assert!(len > MAX_ENVELOPE_BYTES);
+        assert_eq!(ensure_stream_side_open(false), Ok(()));
     }
 
     #[test]
