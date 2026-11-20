@@ -1,0 +1,292 @@
+{
+  "schema": "xenia-aoi-workload/v1",
+  "status": "preregistered_synthetic_workloads_only",
+  "purpose": "Deterministic policy-semantic fixtures for deadline-aware session scheduling. These fixtures are not performance results.",
+  "clock_policy": {
+    "local_monotonic_required": true,
+    "cross_host_subtraction_allowed": false,
+    "physical_input_to_photon_requires_external_instrument": true,
+    "missing_or_unqualified_timing": "INDETERMINATE"
+  },
+  "baseline_policies": [
+    "single_stream_fifo",
+    "multistream_static_bounded",
+    "multistream_deadline_aoi",
+    "simulation_oracle_only"
+  ],
+  "scenarios": [
+    {
+      "id": "AOI-001",
+      "name": "stable-lan-idle",
+      "network": {
+        "capacity_mbps": 100,
+        "rtt_ms": 1,
+        "jitter_ms": 0,
+        "random_loss_pct": 0
+      },
+      "load": {
+        "video_fps": 60,
+        "audio_packet_ms": 20,
+        "control_events_per_second": 2,
+        "telemetry_hz": 1,
+        "bulk_transfer": false
+      },
+      "must_hold": [
+        "all_queue_capacities_respected",
+        "control_fifo_preserved",
+        "no_cross_host_aoi_without_clock_evidence"
+      ]
+    },
+    {
+      "id": "AOI-002",
+      "name": "video-saturation-with-control-release",
+      "network": {
+        "capacity_mbps": 30,
+        "rtt_ms": 1,
+        "jitter_ms": 0,
+        "random_loss_pct": 0
+      },
+      "load": {
+        "video_target_mbps": 27,
+        "video_fps": 60,
+        "control_events_per_second": 20,
+        "bulk_transfer": false
+      },
+      "must_hold": [
+        "key_button_release_not_dropped",
+        "control_order_preserved",
+        "video_may_be_superseded_only_at_safe_codec_boundary",
+        "queue_bounds_preserved"
+      ]
+    },
+    {
+      "id": "AOI-003",
+      "name": "bulk-transfer-under-interaction",
+      "network": {
+        "capacity_mbps": 30,
+        "rtt_ms": 15,
+        "jitter_ms": 5,
+        "random_loss_pct": 0
+      },
+      "load": {
+        "video_fps": 60,
+        "audio_packet_ms": 20,
+        "control_events_per_second": 10,
+        "bulk_transfer": true,
+        "bulk_target_mbps": 20
+      },
+      "must_hold": [
+        "control_and_audio_not_starved",
+        "bulk_backpressure_bounded",
+        "file_chunk_identity_and_offset_preserved",
+        "unknown_commit_not_replayed"
+      ]
+    },
+    {
+      "id": "AOI-004",
+      "name": "reference-frame-loss",
+      "network": {
+        "capacity_mbps": 30,
+        "rtt_ms": 30,
+        "jitter_ms": 15,
+        "random_loss_pct": 1,
+        "burst_loss_packets": 3
+      },
+      "load": {
+        "video_fps": 60,
+        "codec_dependency": "inter_frame_reference_chain"
+      },
+      "must_hold": [
+        "dependent_delta_not_presented_without_reference",
+        "recovery_point_required_before_chain_resumes",
+        "drop_reason_recorded"
+      ]
+    },
+    {
+      "id": "AOI-005",
+      "name": "audio-playout-deadline",
+      "network": {
+        "capacity_mbps": 20,
+        "rtt_ms": 60,
+        "jitter_ms": 30,
+        "random_loss_pct": 1
+      },
+      "load": {
+        "video_fps": 60,
+        "audio_packet_ms": 20,
+        "bulk_transfer": true
+      },
+      "must_hold": [
+        "audio_queue_bounded",
+        "late_packet_outcome_explicit",
+        "video_does_not_monopolize_audio_service",
+        "no_unbounded_jitter_buffer"
+      ]
+    },
+    {
+      "id": "AOI-006",
+      "name": "telemetry-coalescing",
+      "network": {
+        "capacity_mbps": 10,
+        "rtt_ms": 30,
+        "jitter_ms": 5,
+        "random_loss_pct": 0
+      },
+      "load": {
+        "telemetry_hz": 20,
+        "telemetry_consumer_hz": 1,
+        "video_fps": 30
+      },
+      "must_hold": [
+        "telemetry_coalesces_to_latest",
+        "control_and_media_queues_unaffected",
+        "coalesced_count_observable"
+      ]
+    },
+    {
+      "id": "AOI-007",
+      "name": "bandwidth-step-and-hysteresis",
+      "network": {
+        "capacity_mbps_sequence": [
+          30,
+          8,
+          30,
+          8,
+          30
+        ],
+        "step_duration_seconds": 5,
+        "rtt_ms": 30,
+        "jitter_ms": 10,
+        "random_loss_pct": 0
+      },
+      "load": {
+        "video_fps_target": 60,
+        "audio_packet_ms": 20
+      },
+      "must_hold": [
+        "adaptation_hysteresis_prevents_rapid_oscillation",
+        "queue_limits_respected",
+        "control_service_reserved",
+        "missing_estimate_is_not_healthy"
+      ]
+    },
+    {
+      "id": "AOI-008",
+      "name": "rekey-under-load",
+      "network": {
+        "capacity_mbps": 30,
+        "rtt_ms": 30,
+        "jitter_ms": 10,
+        "random_loss_pct": 0
+      },
+      "load": {
+        "video_fps": 60,
+        "audio_packet_ms": 20,
+        "control_events_per_second": 10,
+        "bulk_transfer": true,
+        "rekey_during_saturation": true
+      },
+      "must_hold": [
+        "rekey_barrier_respected",
+        "no_mixed_epoch_acceptance",
+        "control_sequence_continuity_preserved",
+        "no_authority_widening"
+      ]
+    },
+    {
+      "id": "AOI-009",
+      "name": "reconnect-after-unknown-dispatch",
+      "network": {
+        "capacity_mbps": 20,
+        "rtt_ms": 60,
+        "jitter_ms": 15,
+        "random_loss_pct": 1,
+        "disconnect_after_dispatch": true
+      },
+      "load": {
+        "control_state_change": true,
+        "bulk_transfer": false
+      },
+      "must_hold": [
+        "operation_remains_unknown_until_reconciled",
+        "no_speculative_replay",
+        "stable_operation_identity_preserved"
+      ]
+    },
+    {
+      "id": "AOI-010",
+      "name": "revocation-races-effect-commit",
+      "network": {
+        "capacity_mbps": 30,
+        "rtt_ms": 15,
+        "jitter_ms": 5,
+        "random_loss_pct": 0
+      },
+      "load": {
+        "protected_operation_in_flight": true,
+        "revoke_during_queue_pressure": true
+      },
+      "must_hold": [
+        "revoke_before_commit_denies_effect",
+        "commit_before_revoke_has_stage_accurate_receipt",
+        "scheduler_is_not_authority",
+        "unknown_outcome_reconciled"
+      ]
+    },
+    {
+      "id": "AOI-011",
+      "name": "queue-flood-and-starvation",
+      "network": {
+        "capacity_mbps": 8,
+        "rtt_ms": 60,
+        "jitter_ms": 30,
+        "random_loss_pct": 3
+      },
+      "load": {
+        "video_fps": 120,
+        "audio_packet_ms": 10,
+        "telemetry_hz": 50,
+        "bulk_transfer": true,
+        "producer_overload_factor": 2
+      },
+      "must_hold": [
+        "all_queues_bounded",
+        "control_and_audio_not_starved",
+        "video_supersession_observable",
+        "memory_bound_invariant_holds"
+      ]
+    },
+    {
+      "id": "AOI-012",
+      "name": "unqualified-cross-host-clock",
+      "network": {
+        "capacity_mbps": 100,
+        "rtt_ms": 15,
+        "jitter_ms": 5,
+        "random_loss_pct": 0
+      },
+      "load": {
+        "video_fps": 60,
+        "host_viewer_clock_sync": "absent"
+      },
+      "must_hold": [
+        "one_way_aoi_omitted_or_indeterminate",
+        "local_stage_durations_reported_separately",
+        "no_software_callback_claimed_as_photon_time"
+      ]
+    }
+  ],
+  "measurement_rules": {
+    "percentiles": [
+      "p50",
+      "p95",
+      "p99",
+      "max"
+    ],
+    "required_denominators": true,
+    "retain_raw_samples": true,
+    "bind_run_to_source_sha_and_configuration_digest": true,
+    "no_aggregate_score": true,
+    "synthetic_scenarios_never_produce_release_pass": true
+  }
+}
