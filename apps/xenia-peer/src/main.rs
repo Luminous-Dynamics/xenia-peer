@@ -1792,70 +1792,64 @@ fn build_input_injector(
 /// it cannot be held across an `.await` point shared between the poll loop
 /// and the recv task. Opening a connection per poll (default every 500ms)
 /// is cheap enough not to matter.
-fn read_host_clipboard_text() -> Option<String> {
+fn read_host_clipboard_text() -> crate::m1_runtime::HostClipboardReadExecution {
     let mut clipboard = match arboard::Clipboard::new() {
         Ok(clipboard) => clipboard,
         Err(err) => {
-            warn!(error = %err, "failed to open host clipboard for reading");
-            return None;
+            return crate::m1_runtime::HostClipboardReadExecution::NotAttempted(
+                err.to_string(),
+            );
         }
     };
     match clipboard.get_text() {
-        Ok(text) => Some(text),
-        Err(arboard::Error::ContentNotAvailable) => None,
+        Ok(text) => crate::m1_runtime::HostClipboardReadExecution::Completed(Some(text)),
+        Err(arboard::Error::ContentNotAvailable) => {
+            crate::m1_runtime::HostClipboardReadExecution::Completed(None)
+        }
         Err(err) => {
-            warn!(error = %err, "failed to read host clipboard text");
-            None
+            crate::m1_runtime::HostClipboardReadExecution::OutcomeUnknown(err.to_string())
         }
     }
 }
 
-/// Apply a viewer-originated clipboard update to the real host clipboard.
-/// Only called in `--clipboard bidirectional` mode, after the M1 consent
-/// gate has already allowed the flow.
 /// Cap on a single viewer-originated clipboard update applied to the host
-/// clipboard. Without a dedicated cap this is bounded only by the 16 MiB
-/// envelope limit, letting a bidirectional viewer stuff megabytes into the
-/// host clipboard on every update. 1 MiB is well above any realistic text
-/// clipboard.
+/// clipboard. 1 MiB is well above any realistic text clipboard.
 const MAX_INBOUND_CLIPBOARD_BYTES: usize = 1024 * 1024;
 
-fn apply_clipboard_content(content: &ClipboardContent) {
+/// Apply viewer-originated clipboard data and return the actual OS API outcome.
+fn apply_clipboard_content(
+    content: &ClipboardContent,
+) -> crate::m1_runtime::HostClipboardWriteExecution {
     if let ClipboardContent::Text(text) = content
         && text.len() > MAX_INBOUND_CLIPBOARD_BYTES
     {
-        warn!(
-            len = text.len(),
-            cap = MAX_INBOUND_CLIPBOARD_BYTES,
-            "viewer clipboard update exceeds cap; ignoring"
+        return crate::m1_runtime::HostClipboardWriteExecution::NotAttempted(
+            format!(
+                "viewer clipboard update is {} bytes; cap is {}",
+                text.len(),
+                MAX_INBOUND_CLIPBOARD_BYTES
+            ),
         );
-        return;
     }
     let mut clipboard = match arboard::Clipboard::new() {
         Ok(clipboard) => clipboard,
         Err(err) => {
-            warn!(error = %err, "failed to open host clipboard for writing");
-            return;
+            return crate::m1_runtime::HostClipboardWriteExecution::NotAttempted(
+                err.to_string(),
+            );
         }
     };
-    // `Cleared` deliberately uses `set_text("")` rather than `clipboard.clear()`.
-    // Verified live on a real KDE-Wayland session: `clear()` only unsets the
-    // calling connection's own (momentary) selection -- it does not preempt
-    // a selection still actively served by an *earlier* `set_text()` call's
-    // background wl-data-control server, so a stale value kept reading back
-    // after `clear()` returned `Ok`. `set_text("")` actively claims
-    // ownership with empty content, which does override it.
+    // set_text("") actively claims ownership with empty content; clipboard.clear()
+    // does not reliably replace content still served by a prior Wayland owner.
     let result = match content {
         ClipboardContent::Text(text) => clipboard.set_text(text.clone()),
         ClipboardContent::Cleared => clipboard.set_text(String::new()),
     };
-    if let Err(err) = result {
-        warn!(error = %err, "failed to apply viewer clipboard update to host clipboard");
-    } else {
-        info!(
-            ?content,
-            "applied viewer clipboard update to host clipboard"
-        );
+    match result {
+        Ok(()) => crate::m1_runtime::HostClipboardWriteExecution::Applied,
+        Err(err) => {
+            crate::m1_runtime::HostClipboardWriteExecution::OutcomeUnknown(err.to_string())
+        }
     }
 }
 
