@@ -156,6 +156,22 @@
       ],
       "expected": "ReconciliationConflict",
       "claim": "no overwrite"
+    },
+    {
+      "id": "OPE-013",
+      "name": "effect-invoked-but-owner-proves-no-commit",
+      "steps": [
+        "admit",
+        "attempt",
+        "effect_not_committed"
+      ],
+      "expected": "NotCommitted",
+      "claim": "operation was invoked; local commit point definitely not crossed",
+      "assert": [
+        "not-equivalent-to-preflight-rejected",
+        "not-unknown",
+        "receipt-digest-recorded"
+      ]
     }
   ],
   "reporting": {
