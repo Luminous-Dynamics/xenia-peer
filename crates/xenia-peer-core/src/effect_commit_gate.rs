@@ -803,6 +803,21 @@ mod tests {
     }
 
     #[test]
+    fn panic_inside_effect_owner_poisoning_fails_closed() {
+        let gate = gate();
+        let permit = gate
+            .prepare_after_admission(request(15))
+            .unwrap_or_else(|error| panic!("permit failed: {error:?}"));
+        let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = gate.commit(permit, || -> EffectExecution<()> {
+                panic!("simulated effect-owner panic after invocation");
+            });
+        }));
+        assert!(panic_result.is_err());
+        assert_eq!(gate.snapshot(), Err(EffectGateError::LockPoisoned));
+    }
+
+    #[test]
     fn revoked_gate_is_idempotent_only_for_identical_receipt() {
         let gate = gate();
         let first = gate
