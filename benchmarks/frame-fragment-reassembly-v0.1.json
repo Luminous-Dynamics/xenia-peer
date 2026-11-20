@@ -138,6 +138,15 @@
       "assert": [
         "no-reservation-before-validation"
       ]
+    },
+    {
+      "id": "FRAG-017",
+      "name": "non-video-pixel-format",
+      "expected": "UnsupportedPixelFormat",
+      "assert": [
+        "audio-telemetry-control-formats-rejected",
+        "no-reassembly-reservation"
+      ]
     }
   ],
   "transport_candidates": [
