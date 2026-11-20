@@ -1,0 +1,152 @@
+{
+  "schema": "xenia-frame-fragment-reassembly-workloads/v1",
+  "status": "synthetic_receiver_semantics_only",
+  "purpose": "Exercise bounded frame fragment reassembly and adversarial partial-frame behavior. Not a live network or performance benchmark.",
+  "hard_limits": {
+    "max_in_flight_frames": 8,
+    "max_reassembly_bytes": 67108864,
+    "max_frame_bytes": 16777216,
+    "max_fragment_bytes": 65536,
+    "max_total_fragments": 4096,
+    "max_fragments_per_frame": 1024,
+    "terminal_frame_history": 2048
+  },
+  "required_invariants": {
+    "frame_visible_only_after_all_fragments": true,
+    "verify_full_payload_length": true,
+    "verify_full_frame_blake3": true,
+    "bind_session_and_key_epoch": true,
+    "missing_fragments_expire_on_receiver_clock": true,
+    "exact_duplicates_idempotent": true,
+    "conflicting_duplicates_invalidate_frame": true,
+    "completed_or_expired_frame_cannot_be_recreated_within_terminal_history": true,
+    "rekey_discards_incomplete_old_epoch_frames": true,
+    "reserved_bytes_never_exceed_hard_limit": true,
+    "reserved_fragment_descriptors_never_exceed_hard_limit": true,
+    "partial_frame_never_decoder_visible": true
+  },
+  "scenarios": [
+    {
+      "id": "FRAG-001",
+      "name": "ordered-completion",
+      "expected": "Completed",
+      "assert": [
+        "all-indices-present",
+        "exact-length",
+        "digest-match"
+      ]
+    },
+    {
+      "id": "FRAG-002",
+      "name": "out-of-order-completion",
+      "expected": "Completed",
+      "assert": [
+        "reassemble-by-index"
+      ]
+    },
+    {
+      "id": "FRAG-003",
+      "name": "exact-duplicate",
+      "expected": "Duplicate",
+      "assert": [
+        "no-extra-memory",
+        "same-index-same-payload"
+      ]
+    },
+    {
+      "id": "FRAG-004",
+      "name": "conflicting-duplicate",
+      "expected": "ConflictingDuplicate",
+      "assert": [
+        "discard-partial-frame",
+        "release-reservation"
+      ]
+    },
+    {
+      "id": "FRAG-005",
+      "name": "metadata-conflict",
+      "expected": "MetadataConflict",
+      "assert": [
+        "discard-partial-frame"
+      ]
+    },
+    {
+      "id": "FRAG-006",
+      "name": "corrupt-frame-digest",
+      "expected": "FrameDigestMismatch",
+      "assert": [
+        "never-return-decoder-payload"
+      ]
+    },
+    {
+      "id": "FRAG-007",
+      "name": "foreign-session-fragment",
+      "expected": "SessionMismatch"
+    },
+    {
+      "id": "FRAG-008",
+      "name": "old-key-epoch-fragment",
+      "expected": "KeyEpochMismatch"
+    },
+    {
+      "id": "FRAG-009",
+      "name": "rekey-with-incomplete-frame",
+      "expected": "DiscardedOldEpoch",
+      "assert": [
+        "clear-all-old-assemblies",
+        "frame-id-may-reset-in-new-epoch"
+      ]
+    },
+    {
+      "id": "FRAG-010",
+      "name": "in-flight-frame-flood",
+      "expected": "FrameCapacityFull"
+    },
+    {
+      "id": "FRAG-011",
+      "name": "aggregate-byte-reservation-flood",
+      "expected": "ReassemblyBytesFull"
+    },
+    {
+      "id": "FRAG-012",
+      "name": "aggregate-descriptor-flood",
+      "expected": "FragmentDescriptorCapacityFull"
+    },
+    {
+      "id": "FRAG-013",
+      "name": "incomplete-frame-expires",
+      "expected": "Expired",
+      "assert": [
+        "release-bytes-and-descriptors",
+        "tombstone-late-fragments"
+      ]
+    },
+    {
+      "id": "FRAG-014",
+      "name": "late-replay-after-completion",
+      "expected": "FrameAlreadyFinalized"
+    },
+    {
+      "id": "FRAG-015",
+      "name": "clock-regression",
+      "expected": "ClockRegression"
+    },
+    {
+      "id": "FRAG-016",
+      "name": "oversized-fragment-and-frame",
+      "expected": "ExplicitReject",
+      "assert": [
+        "no-reservation-before-validation"
+      ]
+    }
+  ],
+  "transport_candidates": [
+    "ordered_quic_stream_fragments",
+    "quic_datagram_fragments",
+    "hybrid_control_file_stream_media_datagram",
+    "whole_frame_single_stream_baseline",
+    "whole_frame_multistream_baseline"
+  ],
+  "performance_results": null,
+  "notes": "Synthetic fixtures only. max_fragment_bytes must be negotiated/derived from transport limits for DATAGRAM; 64 KiB is only the default stream-fragment ceiling."
+}
