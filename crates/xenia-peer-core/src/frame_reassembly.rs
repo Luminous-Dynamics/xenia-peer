@@ -342,25 +342,33 @@ impl FrameReassembler {
             return Err(FrameFragmentError::InvalidDimensions);
         }
 
-        if let Some(existing) = self.assemblies.get(&fragment.key) {
+        let existing_state = self.assemblies.get(&fragment.key).map(|existing| {
             let metadata_matches = existing.metadata == fragment.metadata
                 && existing.fragment_count == fragment.fragment_count
                 && existing.total_frame_bytes == fragment.total_frame_bytes
                 && existing.frame_digest == fragment.frame_digest;
+            let duplicate = existing
+                .fragments
+                .get(usize::from(fragment.fragment_index))
+                .and_then(Option::as_ref)
+                .map(|payload| payload == &fragment.payload);
+            (
+                metadata_matches,
+                duplicate,
+                existing.received_fragments,
+                existing.fragment_count,
+            )
+        });
+        if let Some((metadata_matches, duplicate, received, total)) = existing_state {
             if !metadata_matches {
                 self.remove_assembly(fragment.key);
                 return Err(FrameFragmentError::MetadataConflict);
             }
-
-            if let Some(existing_payload) = existing
-                .fragments
-                .get(usize::from(fragment.fragment_index))
-                .and_then(Option::as_ref)
-            {
-                if existing_payload == &fragment.payload {
+            if let Some(identical) = duplicate {
+                if identical {
                     return Ok(FrameFragmentDisposition::Duplicate {
-                        received_fragments: existing.received_fragments,
-                        total_fragments: existing.fragment_count,
+                        received_fragments: received,
+                        total_fragments: total,
                     });
                 }
                 self.remove_assembly(fragment.key);
@@ -402,6 +410,20 @@ impl FrameReassembler {
             );
         }
 
+        let exceeds_declared_size = self
+            .assemblies
+            .get(&fragment.key)
+            .is_some_and(|assembly| {
+                assembly
+                    .received_bytes
+                    .saturating_add(fragment.payload.len())
+                    > assembly.total_frame_bytes
+            });
+        if exceeds_declared_size {
+            self.remove_assembly(fragment.key);
+            return Err(FrameFragmentError::ExceedsDeclaredFrameSize);
+        }
+
         let assembly = self
             .assemblies
             .get_mut(&fragment.key)
@@ -409,11 +431,6 @@ impl FrameReassembler {
         let next_received_bytes = assembly
             .received_bytes
             .saturating_add(fragment.payload.len());
-        if next_received_bytes > assembly.total_frame_bytes {
-            self.remove_assembly(fragment.key);
-            return Err(FrameFragmentError::ExceedsDeclaredFrameSize);
-        }
-
         let slot = assembly
             .fragments
             .get_mut(usize::from(fragment.fragment_index))
