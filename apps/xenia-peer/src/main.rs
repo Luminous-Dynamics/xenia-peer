@@ -6637,11 +6637,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             ))
                         });
                         if injector.backend_name() == "noop" {
-                            return Err(xenia_inject::InjectError::Unavailable(
+                            return crate::m1_runtime::InputEffectExecution::NotAttempted(
                                 "configured input backend is unavailable".to_string(),
-                            ));
+                            );
                         }
-                        injector.process_events(std::slice::from_ref(&event))
+                        match injector.process_events(std::slice::from_ref(&event)) {
+                            Ok(()) => crate::m1_runtime::InputEffectExecution::PlatformAccepted,
+                            Err(error) => {
+                                crate::m1_runtime::InputEffectExecution::OutcomeUnknown(error)
+                            }
+                        }
                     })
                 };
                 let injection_result = match injection_result {
@@ -6653,19 +6658,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 };
                 let backend = injector
                     .as_ref()
-                    .map(SessionInputInjector::backend_name)
+                    .map(|value| value.backend_name())
                     .unwrap_or("unavailable");
                 match injection_result {
-                    Ok(()) => {
+                    crate::m1_runtime::InputEffectExecution::PlatformAccepted => {
                         info!(
                             ?event,
                             backend,
                             "platform input injector accepted event"
                         );
                     }
-                    Err(err) => {
+                    crate::m1_runtime::InputEffectExecution::NotAttempted(reason) => {
                         warn!(
-                            error = %err,
+                            reason,
+                            backend,
+                            "input event was not attempted by a platform backend"
+                        );
+                    }
+                    crate::m1_runtime::InputEffectExecution::OutcomeUnknown(error) => {
+                        warn!(
+                            error = %error,
                             backend,
                             "input injector returned an uncertain outcome"
                         );
