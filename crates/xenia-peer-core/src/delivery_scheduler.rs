@@ -300,7 +300,7 @@ pub enum RejectReason {
 /// Bounded queue counters. These are local aggregate counts, not user data.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SchedulerStats {
-    /// Newly accepted items.
+    /// Newly admitted items, including accepted coalescing/supersession.
     pub accepted: u64,
     /// Replaced telemetry samples.
     pub coalesced: u64,
@@ -491,8 +491,13 @@ impl DeliveryScheduler {
                     } if *existing == metric_key
                 )
             }) {
-                let old_cost = queue.items.get(index).expect("index came from queue").cost_bytes;
-                let replaced_id = queue.items.get(index).expect("index came from queue").id;
+                let (old_cost, replaced_id) = match queue.items.get(index) {
+                    Some(old) => (old.cost_bytes, old.id),
+                    None => {
+                        self.stats.rejected = self.stats.rejected.saturating_add(1);
+                        return EnqueueDisposition::Rejected(RejectReason::Full);
+                    }
+                };
                 let new_bytes = queue
                     .bytes
                     .saturating_sub(old_cost)
@@ -501,8 +506,12 @@ impl DeliveryScheduler {
                     self.stats.rejected = self.stats.rejected.saturating_add(1);
                     return EnqueueDisposition::Rejected(RejectReason::Full);
                 }
-                queue.remove(index).expect("index came from queue");
+                if queue.remove(index).is_none() {
+                    self.stats.rejected = self.stats.rejected.saturating_add(1);
+                    return EnqueueDisposition::Rejected(RejectReason::Full);
+                }
                 queue.push(item);
+                self.stats.accepted = self.stats.accepted.saturating_add(1);
                 self.stats.coalesced = self.stats.coalesced.saturating_add(1);
                 return EnqueueDisposition::Coalesced { replaced_id };
             }
@@ -554,23 +563,26 @@ impl DeliveryScheduler {
         } = &item.kind
         {
             if let Some(index) = queue.items.len().checked_sub(1) {
-                let replaced_id = queue.items.get(index).map(|last| last.id);
-                let old_cost = queue.items.get(index).map(|last| last.cost_bytes).unwrap_or(0);
                 let replaceable = queue.items.get(index).is_some_and(|last| {
                     last.kind.video_dependency() == Some(Some(*new_reference))
                 });
                 if replaceable {
+                    let (old_cost, replaced_id) = match queue.items.get(index) {
+                        Some(old) => (old.cost_bytes, old.id),
+                        None => {
+                            self.stats.rejected = self.stats.rejected.saturating_add(1);
+                            return EnqueueDisposition::Rejected(RejectReason::Full);
+                        }
+                    };
                     let new_bytes = queue
                         .bytes
                         .saturating_sub(old_cost)
                         .saturating_add(item.cost_bytes);
-                    if new_bytes <= limit.max_bytes {
-                        queue.remove(index).expect("index came from queue");
+                    if new_bytes <= limit.max_bytes && queue.remove(index).is_some() {
                         queue.push(item);
+                        self.stats.accepted = self.stats.accepted.saturating_add(1);
                         self.stats.coalesced = self.stats.coalesced.saturating_add(1);
-                        return EnqueueDisposition::Coalesced {
-                            replaced_id: replaced_id.unwrap_or(0),
-                        };
+                        return EnqueueDisposition::Coalesced { replaced_id };
                     }
                 }
             }
@@ -710,7 +722,13 @@ impl DeliveryScheduler {
 mod tests {
     use super::*;
 
-    fn item(id: u64, enqueued_at_ticks: u64, deadline_ticks: Option<u64>, cost_bytes: usize, kind: WorkKind) -> WorkItem {
+    fn item(
+        id: u64,
+        enqueued_at_ticks: u64,
+        deadline_ticks: Option<u64>,
+        cost_bytes: usize,
+        kind: WorkKind,
+    ) -> WorkItem {
         WorkItem {
             id,
             enqueued_at_ticks,
@@ -718,6 +736,17 @@ mod tests {
             cost_bytes,
             kind,
         }
+    }
+
+    fn new_scheduler(config: SchedulerConfig) -> DeliveryScheduler {
+        DeliveryScheduler::new(config)
+            .unwrap_or_else(|error| panic!("valid scheduler config rejected: {error:?}"))
+    }
+
+    fn selected(scheduler: &mut DeliveryScheduler, now_ticks: u64) -> WorkItem {
+        scheduler
+            .next_ready(now_ticks)
+            .unwrap_or_else(|| panic!("expected an eligible queued item"))
     }
 
     fn control(id: u64, sequence: u64) -> WorkItem {
@@ -774,34 +803,34 @@ mod tests {
 
     #[test]
     fn control_transitions_are_ordered_and_non_monotonic_sequences_rejected() {
-        let mut scheduler = DeliveryScheduler::new(SchedulerConfig::default()).unwrap();
+        let mut scheduler = new_scheduler(SchedulerConfig::default());
         assert_eq!(scheduler.enqueue(control(1, 1), 0), EnqueueDisposition::Accepted);
         assert_eq!(scheduler.enqueue(control(2, 2), 0), EnqueueDisposition::Accepted);
         assert_eq!(
             scheduler.enqueue(control(3, 1), 0),
             EnqueueDisposition::Rejected(RejectReason::NonMonotonicControl)
         );
-        assert_eq!(scheduler.next_ready(0).unwrap().id, 1);
-        assert_eq!(scheduler.next_ready(0).unwrap().id, 2);
+        assert_eq!(selected(&mut scheduler, 0).id, 1);
+        assert_eq!(selected(&mut scheduler, 0).id, 2);
     }
 
     #[test]
     fn full_control_queue_rejects_explicitly_without_losing_existing_transition() {
         let mut config = SchedulerConfig::default();
         config.control.max_items = 1;
-        let mut scheduler = DeliveryScheduler::new(config).unwrap();
+        let mut scheduler = new_scheduler(config);
         assert_eq!(scheduler.enqueue(control(1, 1), 0), EnqueueDisposition::Accepted);
         assert_eq!(
             scheduler.enqueue(control(2, 2), 0),
             EnqueueDisposition::Rejected(RejectReason::Full)
         );
-        assert_eq!(scheduler.next_ready(0).unwrap().id, 1);
+        assert_eq!(selected(&mut scheduler, 0).id, 1);
         assert_eq!(scheduler.enqueue(control(2, 2), 0), EnqueueDisposition::Accepted);
     }
 
     #[test]
     fn telemetry_coalesces_only_the_same_metric_key() {
-        let mut scheduler = DeliveryScheduler::new(SchedulerConfig::default()).unwrap();
+        let mut scheduler = new_scheduler(SchedulerConfig::default());
         let first = item(1, 0, None, 16, WorkKind::Telemetry { metric_key: 7 });
         let second = item(2, 1, None, 16, WorkKind::Telemetry { metric_key: 7 });
         assert_eq!(scheduler.enqueue(first, 0), EnqueueDisposition::Accepted);
@@ -809,14 +838,14 @@ mod tests {
             scheduler.enqueue(second, 1),
             EnqueueDisposition::Coalesced { replaced_id: 1 }
         );
-        let selected = scheduler.next_ready(1).unwrap();
+        let selected = selected(&mut scheduler, 1);
         assert_eq!(selected.id, 2);
         assert_eq!(scheduler.snapshot().stats.coalesced, 1);
     }
 
     #[test]
     fn independent_video_frame_supersedes_pending_dependency_chain() {
-        let mut scheduler = DeliveryScheduler::new(SchedulerConfig::default()).unwrap();
+        let mut scheduler = new_scheduler(SchedulerConfig::default());
         assert_eq!(scheduler.enqueue(video(1, 10, None, None), 0), EnqueueDisposition::Accepted);
         assert_eq!(scheduler.enqueue(video(2, 11, Some(10), None), 0), EnqueueDisposition::Accepted);
         assert_eq!(
@@ -824,12 +853,12 @@ mod tests {
             EnqueueDisposition::Superseded { removed_items: 2 }
         );
         assert_eq!(scheduler.snapshot().lanes[DeliveryClass::Video.index()].queued_items, 1);
-        assert_eq!(scheduler.next_ready(0).unwrap().id, 3);
+        assert_eq!(selected(&mut scheduler, 0).id, 3);
     }
 
     #[test]
     fn stale_video_reference_invalidates_its_dependent_delta_chain() {
-        let mut scheduler = DeliveryScheduler::new(SchedulerConfig::default()).unwrap();
+        let mut scheduler = new_scheduler(SchedulerConfig::default());
         assert_eq!(
             scheduler.enqueue(video(1, 10, None, Some(5)), 0),
             EnqueueDisposition::Accepted
@@ -847,7 +876,7 @@ mod tests {
 
     #[test]
     fn delta_frame_without_a_queued_or_dispatched_reference_is_rejected() {
-        let mut scheduler = DeliveryScheduler::new(SchedulerConfig::default()).unwrap();
+        let mut scheduler = new_scheduler(SchedulerConfig::default());
         assert_eq!(
             scheduler.enqueue(video(1, 11, Some(10), None), 0),
             EnqueueDisposition::Rejected(RejectReason::MissingVideoReference)
@@ -858,7 +887,7 @@ mod tests {
 
     #[test]
     fn audio_after_deadline_is_not_dispatched() {
-        let mut scheduler = DeliveryScheduler::new(SchedulerConfig::default()).unwrap();
+        let mut scheduler = new_scheduler(SchedulerConfig::default());
         assert_eq!(scheduler.enqueue(audio(1, 1, 5), 0), EnqueueDisposition::Accepted);
         assert!(scheduler.next_ready(5).is_none());
         assert_eq!(scheduler.snapshot().stats.expired, 1);
@@ -868,7 +897,7 @@ mod tests {
     fn bulk_transfer_is_never_expired_by_media_age_policy() {
         let mut config = SchedulerConfig::default();
         config.bulk.max_age_ticks = Some(1);
-        let mut scheduler = DeliveryScheduler::new(config).unwrap();
+        let mut scheduler = new_scheduler(config);
         let chunk = item(
             1,
             0,
@@ -881,12 +910,12 @@ mod tests {
             },
         );
         assert_eq!(scheduler.enqueue(chunk, 0), EnqueueDisposition::Accepted);
-        assert_eq!(scheduler.next_ready(10_000).unwrap().id, 1);
+        assert_eq!(selected(&mut scheduler, 10_000).id, 1);
     }
 
     #[test]
     fn weighted_cycle_services_every_backlogged_class() {
-        let mut scheduler = DeliveryScheduler::new(config_with_capacity(64)).unwrap();
+        let mut scheduler = new_scheduler(config_with_capacity(64));
         scheduler.set_initial_video_reference(100);
         for sequence in 1..=48 {
             assert_eq!(
@@ -939,7 +968,7 @@ mod tests {
         }
         let mut selected = [0_u64; 5];
         for _ in 0..60 {
-            let next = scheduler.next_ready(0).unwrap();
+            let next = selected(&mut scheduler, 0);
             selected[next.class().index()] += 1;
             if let WorkKind::Video { frame_id, .. } = next.kind {
                 scheduler.record_video_dispatched(frame_id);
@@ -950,7 +979,7 @@ mod tests {
 
     #[test]
     fn all_queue_capacities_remain_within_configured_bounds() {
-        let mut scheduler = DeliveryScheduler::new(config_with_capacity(8)).unwrap();
+        let mut scheduler = new_scheduler(config_with_capacity(8));
         scheduler.set_initial_video_reference(0);
         for sequence in 1..=8 {
             let _ = scheduler.enqueue(control(sequence, sequence), 0);
