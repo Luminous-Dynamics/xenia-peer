@@ -43,7 +43,18 @@ pub(crate) fn disposition_for_m1_event(event: M1AuditEvent) -> M1LedgerDispositi
         | M1AuditEvent::HostClipboardRead
         | M1AuditEvent::HostClipboardWritten
         | M1AuditEvent::FileSentToViewer
-        | M1AuditEvent::FileReceivedFromViewer => {
+        | M1AuditEvent::FileReceivedFromViewer
+        | M1AuditEvent::FramePermissionAdmitted
+        | M1AuditEvent::TelemetryPermissionAdmitted
+        | M1AuditEvent::AudioPermissionAdmitted
+        | M1AuditEvent::InputPermissionAdmitted
+        | M1AuditEvent::HostClipboardReadPermissionAdmitted
+        | M1AuditEvent::HostClipboardWritePermissionAdmitted
+        | M1AuditEvent::FileSendPermissionAdmitted
+        | M1AuditEvent::FileReceivePermissionAdmitted
+        | M1AuditEvent::InputPlatformAccepted
+        | M1AuditEvent::InputOutcomeUnknown
+        | M1AuditEvent::InputNotAttempted => {
             M1LedgerDisposition::Skip(M1LedgerSkipReason::NotConsentBoundary)
         }
         M1AuditEvent::SessionEnded => {
@@ -109,6 +120,37 @@ mod tests {
             disposition_for_m1_event(M1AuditEvent::InputInjected),
             M1LedgerDisposition::Skip(M1LedgerSkipReason::NotConsentBoundary)
         );
+    }
+
+    #[test]
+    fn permission_and_input_outcome_events_remain_outside_consent_journal() {
+        let events = [
+            M1AuditEvent::FramePermissionAdmitted,
+            M1AuditEvent::TelemetryPermissionAdmitted,
+            M1AuditEvent::AudioPermissionAdmitted,
+            M1AuditEvent::InputPermissionAdmitted,
+            M1AuditEvent::HostClipboardReadPermissionAdmitted,
+            M1AuditEvent::HostClipboardWritePermissionAdmitted,
+            M1AuditEvent::FileSendPermissionAdmitted,
+            M1AuditEvent::FileReceivePermissionAdmitted,
+            M1AuditEvent::InputPlatformAccepted,
+            M1AuditEvent::InputOutcomeUnknown,
+            M1AuditEvent::InputNotAttempted,
+        ];
+        for event in events {
+            assert_eq!(
+                disposition_for_m1_event(event),
+                M1LedgerDisposition::Skip(M1LedgerSkipReason::NotConsentBoundary)
+            );
+            assert!(consent_record_for_m1_event(
+                [1; 32],
+                Uuid::from_bytes([2; 16]),
+                Uuid::from_bytes([3; 16]),
+                "view screen",
+                event,
+            )
+            .is_none());
+        }
     }
 
     #[test]
