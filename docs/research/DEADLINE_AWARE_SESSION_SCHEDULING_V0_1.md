@@ -190,7 +190,7 @@ The draft branch now contains a pure policy model in `crates/xenia-peer-core/src
 The model implements:
 
 - five typed delivery classes with separate bounded item and byte capacities;
-- byte-weighted Deficit Round Robin with provisional quanta of 64 KiB Control, 256 KiB Video, 64 KiB Audio, 16 KiB Telemetry and 32 KiB Bulk;
+- byte-weighted Deficit Round Robin with explicit once-per-visit quantum state and provisional quanta of 64 KiB Control, 256 KiB Video, 64 KiB Audio, 16 KiB Telemetry and 32 KiB Bulk;
 - explicit queue admission, coalescing, supersession and rejection outcomes;
 - monotonic sequence admission for control, audio and video frame identities;
 - deadline/age pruning for video, audio and telemetry, while control and bulk are never silently aged out;
@@ -204,7 +204,9 @@ Configuration rejects zero capacities, zero age budgets, lane capacities above 6
 
 **Important scheduling boundary:** this model selects whole work items. WDRR byte accounting does not preempt a large send after the caller starts writing it. A whole 4–16 MiB frame or file chunk can still create non-preemptible sender blocking, depending on the transport writer. A bounded, frame-safe fragmentation/preemption contract is tracked separately in [#529](https://github.com/Luminous-Dynamics/xenia-peer/issues/529). Do not infer an end-to-end control p99 guarantee from this queue model alone.
 
-Unit tests are authored for control ordering/full-queue behavior, audio/video sequence monotonicity, telemetry coalescing, keyframe dependency resets, known-unsent dependency invalidation, stale reference chains, audio deadlines, bulk retention, byte-deficit service across classes, queue bounds, and invalid configuration.
+Unit tests are authored for control ordering/full-queue behavior, audio/video sequence monotonicity, telemetry coalescing, keyframe dependency resets, known-unsent dependency invalidation, stale reference chains, audio deadlines, bulk retention, byte-deficit service across classes, a sustained two-item-per-class quantum-yield regression, queue bounds, and invalid configuration.
+
+A source review found and corrected an initial WDRR visit-state bug: after a lane spent its quantum exactly, it could receive another quantum on the next call without yielding, starving other lanes. The scheduler now tracks whether the current visit has already received its quantum and advances when the remaining deficit cannot cover the next head item. The new fairness regression test checks two items per lane in the expected cyclic service order. This is authored test coverage, not an executed test result.
 
 An integration-test simulator now compares three policies over a deterministic, heterogeneous, preloaded backlog: global FIFO, per-class item round robin, and the actual `DeliveryScheduler` WDRR implementation. It uses one byte of service work per synthetic tick and reports completion in byte-time units. Tests require every policy to complete the same total work and require WDRR to improve control-tail completion against both references on this exact workload. These are regression assertions, not real-time milliseconds or network-performance results. Static item-weighted service, deadline/AoI scheduling and an offline oracle remain additional future candidates. **They have not yet been executed**: this authoring environment has no Rust toolchain, and hosted CI is not treated as evidence while queued. The branch contains no runtime transport integration and claims no measured performance or safety qualification.
 
