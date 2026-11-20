@@ -1,0 +1,151 @@
+{
+  "schema": "xenia-effect-commit-gate-v1",
+  "status": "synthetic_gate_state_machine_fixtures_only",
+  "purpose": "Exercise local commit/revoke ordering, stale permits, unresolved outcomes and fail-closed behavior. No fixture represents a real OS effect.",
+  "constraints": {
+    "one_mutex_serializes_commit_and_revoke": true,
+    "effect_closure_must_be_synchronous_and_bounded": true,
+    "async_network_operations_cannot_be_wrapped_as_atomic_local_commits": true,
+    "authorization_is_external": true,
+    "unknown_blocks_new_mutations": true,
+    "reconciliation_receipt_must_be_verified_by_caller": true,
+    "panic_poisons_gate_fail_closed": true,
+    "restart_requires_authority_revalidation": true
+  },
+  "scenarios": [
+    {
+      "id": "ECG-001",
+      "name": "permit-then-commit",
+      "steps": [
+        "prepare",
+        "commit_committed"
+      ],
+      "expected": "Committed",
+      "assert": [
+        "receipt_binds_session_lane_direction_context_epoch"
+      ]
+    },
+    {
+      "id": "ECG-002",
+      "name": "revoke-before-commit",
+      "steps": [
+        "prepare",
+        "revoke",
+        "commit"
+      ],
+      "expected": "Revoked",
+      "assert": [
+        "effect_closure_not_invoked"
+      ]
+    },
+    {
+      "id": "ECG-003",
+      "name": "commit-lock-before-revoke",
+      "steps": [
+        "prepare",
+        "enter_commit_closure",
+        "revoke_waits",
+        "finish_commit",
+        "revoke_returns"
+      ],
+      "expected": "CommitBeforeRevoke",
+      "assert": [
+        "effect_closure_finishes_before_revoke_linearizes"
+      ]
+    },
+    {
+      "id": "ECG-004",
+      "name": "epoch-advance-invalidates-permit",
+      "steps": [
+        "prepare_epoch_7",
+        "advance_epoch_8",
+        "commit"
+      ],
+      "expected": "AuthorityEpochMismatch"
+    },
+    {
+      "id": "ECG-005",
+      "name": "duplicate-operation-id",
+      "steps": [
+        "prepare_id_1",
+        "prepare_id_1"
+      ],
+      "expected": "DuplicateOperation"
+    },
+    {
+      "id": "ECG-006",
+      "name": "foreign-gate-permit",
+      "steps": [
+        "gate_a_prepare",
+        "gate_b_commit"
+      ],
+      "expected": "ForeignGatePermit"
+    },
+    {
+      "id": "ECG-007",
+      "name": "unknown-outcome-holds-session",
+      "steps": [
+        "prepare",
+        "commit_unknown",
+        "prepare_new_id"
+      ],
+      "expected": "UnknownOutcomeOutstanding"
+    },
+    {
+      "id": "ECG-008",
+      "name": "unknown-reconciled-not-committed",
+      "steps": [
+        "commit_unknown",
+        "verify_receipt",
+        "reconcile_not_committed",
+        "prepare_new_id"
+      ],
+      "expected": "AdmissionAllowed"
+    },
+    {
+      "id": "ECG-009",
+      "name": "unknown-reconciled-committed",
+      "steps": [
+        "commit_unknown",
+        "verify_receipt",
+        "reconcile_committed"
+      ],
+      "expected": "ReconciledCommitted"
+    },
+    {
+      "id": "ECG-010",
+      "name": "stale-regrant-epoch",
+      "steps": [
+        "revoke_epoch_8",
+        "reactivate_epoch_8"
+      ],
+      "expected": "NonMonotonicEpoch"
+    },
+    {
+      "id": "ECG-011",
+      "name": "effect-closure-panic",
+      "steps": [
+        "prepare",
+        "closure_panics",
+        "snapshot"
+      ],
+      "expected": "LockPoisoned"
+    },
+    {
+      "id": "ECG-012",
+      "name": "session-fingerprint-mismatch",
+      "steps": [
+        "prepare_foreign_session"
+      ],
+      "expected": "SessionMismatch"
+    }
+  ],
+  "reporting": {
+    "linearization_order_required": true,
+    "no_effect_on_revoke_first": true,
+    "no_new_mutation_during_unknown": true,
+    "async_network_commit_claim_forbidden": true,
+    "test_denominator_required": true,
+    "no_performance_or_production_claim_from_synthetic_tests": true
+  }
+}
