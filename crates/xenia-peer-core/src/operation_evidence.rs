@@ -82,15 +82,19 @@ impl OperationContext {
                 hasher.update(&[1]);
                 hasher.update(&digest);
             }
-            None => hasher.update(&[0]),
-        };
+            None => {
+                hasher.update(&[0]);
+            }
+        }
         match self.authority_epoch {
             Some(epoch) => {
                 hasher.update(&[1]);
                 hasher.update(&epoch.to_le_bytes());
             }
-            None => hasher.update(&[0]),
-        };
+            None => {
+                hasher.update(&[0]);
+            }
+        }
         *hasher.finalize().as_bytes()
     }
 }
@@ -179,6 +183,8 @@ pub struct OperationEvidenceEvent {
     pub context_digest: [u8; 32],
     /// Stage established by the producer.
     pub kind: OperationEventKind,
+    /// Clock-domain identifier for the local monotonic tick.
+    pub clock_domain: u64,
     /// Local monotonic tick in the ledger's one clock domain.
     pub at_ticks: u64,
     /// Digest/commitment for the evidence supporting this stage.
@@ -498,7 +504,7 @@ impl OperationEvidenceLedger {
             ReconciliationOutcome::Committed => OperationState::ReconciledCommitted,
             ReconciliationOutcome::Observed => OperationState::ReconciledObserved,
         };
-        let snapshot = self.transition(
+        let mut snapshot = self.transition(
             operation_id,
             &[OperationState::Unknown],
             next,
@@ -506,9 +512,8 @@ impl OperationEvidenceLedger {
             at_ticks,
             receipt_digest,
         )?;
-        if let Some(record) = self.records.get_mut(&operation_id) {
-            record.reconciliation_digest = Some(receipt_digest);
-        }
+        snapshot.reconciliation_digest = Some(receipt_digest);
+        self.records.insert(operation_id, snapshot);
         Ok(snapshot)
     }
 
@@ -557,7 +562,7 @@ impl OperationEvidenceLedger {
                 event.operation_sequence,
                 event.context_digest,
                 event.kind,
-                self.clock_domain,
+                event.clock_domain,
                 event.at_ticks,
                 event.evidence_digest,
             );
@@ -655,6 +660,7 @@ impl OperationEvidenceLedger {
             operation_sequence,
             context_digest,
             kind,
+            clock_domain: self.clock_domain,
             at_ticks,
             evidence_digest,
             previous_hash,
