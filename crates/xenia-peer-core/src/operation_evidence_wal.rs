@@ -342,10 +342,19 @@ fn recovery_unknown_digest(
     *hasher.finalize().as_bytes()
 }
 
-fn reserved_wal_bytes_for_test(slots: usize) -> u64 {
+fn reserved_wal_bytes_for_slots(
+    slots: usize,
+) -> Result<u64, DurableOperationJournalError> {
+    let frame_and_record_bytes = 4_u64
+        .checked_add(
+            u64::try_from(MAX_OPERATION_WAL_RECORD_BYTES)
+                .map_err(|_| DurableOperationJournalError::CapacityFull)?,
+        )
+        .ok_or(DurableOperationJournalError::CapacityFull)?;
     u64::try_from(slots)
-        .unwrap_or(u64::MAX)
-        .saturating_mul(4_u64.saturating_add(MAX_OPERATION_WAL_RECORD_BYTES as u64))
+        .ok()
+        .and_then(|count| count.checked_mul(frame_and_record_bytes))
+        .ok_or(DurableOperationJournalError::CapacityFull)
 }
 
 fn reserved_event_slots_for_state(state: OperationState) -> usize {
@@ -820,16 +829,8 @@ impl DurableOperationEvidenceJournal {
         &self,
         reserved_slots_after: usize,
     ) -> Result<(), DurableOperationJournalError> {
-        let frame_and_record_bytes = 4_u64
-            .checked_add(
-                u64::try_from(MAX_OPERATION_WAL_RECORD_BYTES)
-                    .map_err(|_| DurableOperationJournalError::CapacityFull)?,
-            )
-            .ok_or(DurableOperationJournalError::CapacityFull)?;
-        let reserved_bytes = u64::try_from(reserved_slots_after)
-            .ok()
-            .and_then(|slots| slots.checked_mul(frame_and_record_bytes))
-            .ok_or(DurableOperationJournalError::CapacityFull)?;
+        let frame_and_record_bytes = reserved_wal_bytes_for_slots(1)?;
+        let reserved_bytes = reserved_wal_bytes_for_slots(reserved_slots_after)?;
         let required = self
             .file
             .metadata()?
@@ -1487,13 +1488,10 @@ mod tests {
 
     #[test]
     fn reserved_wal_space_covers_each_terminal_and_reconciliation_slot() {
-        let frame_and_record =
-            4_u64.saturating_add(MAX_OPERATION_WAL_RECORD_BYTES as u64);
+        let frame_and_record = reserved_wal_bytes_for_slots(1).unwrap();
         assert_eq!(
-            u64::try_from(3_usize)
-                .unwrap_or(u64::MAX)
-                .saturating_mul(frame_and_record),
-            reserved_wal_bytes_for_test(3)
+            reserved_wal_bytes_for_slots(3).unwrap(),
+            frame_and_record.saturating_mul(3)
         );
         assert!(MAX_OPERATION_WAL_RECORD_BYTES <= 1024);
     }
