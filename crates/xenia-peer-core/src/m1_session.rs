@@ -245,6 +245,31 @@ impl M1SessionMachine {
         &self.audit
     }
 
+    /// Drain audit events into a caller-owned collection.
+    ///
+    /// This preserves the state machine's internal vector allocation so a
+    /// runtime can reuse its destination queue instead of allocating one
+    /// vector for every accepted input or frame event. The state machine
+    /// retains its full history for deterministic callers and tests unless
+    /// they explicitly drain it. Draining changes neither lifecycle state
+    /// nor granted permissions.
+    pub fn drain_audit_events_into(
+        &mut self,
+        destination: &mut impl Extend<M1AuditEvent>,
+    ) {
+        destination.extend(self.audit.drain(..));
+    }
+
+    /// Drain the audit events emitted since the previous read or drain.
+    ///
+    /// This convenience form returns an owned vector. High-rate runtimes
+    /// should prefer [Self::drain_audit_events_into] to reuse their buffer.
+    pub fn drain_audit_events(&mut self) -> Vec<M1AuditEvent> {
+        let mut events = Vec::new();
+        self.drain_audit_events_into(&mut events);
+        events
+    }
+
     /// Host offers a session.
     pub fn offer(&mut self) -> Result<(), M1SessionError> {
         self.transition(
@@ -924,6 +949,42 @@ mod tests {
                 action: "grant_consent"
             }
         );
+    }
+
+    #[test]
+    fn draining_audit_events_preserves_state_and_permissions() {
+        let mut session = M1SessionMachine::new();
+        session.offer().unwrap();
+        session.grant_consent_scoped(M1PermissionSet {
+            stream_frame: true,
+            inject_input: true,
+            ..M1PermissionSet::default()
+        })
+        .unwrap();
+        session.inject_input().unwrap();
+
+        let state_before = session.state();
+        let permissions_before = session.granted_permissions();
+        let drained = session.drain_audit_events();
+
+        assert_eq!(
+            drained,
+            vec![
+                M1AuditEvent::SessionOffered,
+                M1AuditEvent::ConsentGranted,
+                M1AuditEvent::InputInjected
+            ]
+        );
+        assert!(session.audit().is_empty());
+        assert_eq!(session.state(), state_before);
+        assert_eq!(session.granted_permissions(), permissions_before);
+
+        session.inject_input().unwrap();
+        assert_eq!(
+            session.drain_audit_events(),
+            vec![M1AuditEvent::InputInjected]
+        );
+        assert!(session.audit().is_empty());
     }
 
     #[test]
