@@ -416,7 +416,12 @@ impl DurableOperationEvidenceJournal {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            file.set_permissions(fs::Permissions::from_mode(0o600))?;
+            if let Err(error) = file.set_permissions(fs::Permissions::from_mode(0o600)) {
+                drop(file);
+                drop(lock_file);
+                let _ = fs::remove_file(&lock_path);
+                return Err(DurableOperationJournalError::Io(error));
+            }
         }
 
         let mut journal = Self {
