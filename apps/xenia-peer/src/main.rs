@@ -1941,7 +1941,14 @@ fn m1_consent_scope(args: &Args) -> String {
         (false, true) => "file-transfer: viewer-to-host receive",
         (true, true) => "file-transfer: bidirectional",
     };
-    format!("display: screen stream; {telemetry}; {audio}; {input}; {clipboard}; {file_transfer}")
+    let read_only_workload = if granted.execute_read_only_workload {
+        "read-only-workload: enabled"
+    } else {
+        "read-only-workload: off"
+    };
+    format!(
+        "display: screen stream; {telemetry}; {audio}; {input}; {clipboard}; {file_transfer}; {read_only_workload}"
+    )
 }
 
 /// Load an Ed25519 signing key from `path`, or generate and persist a fresh
@@ -2061,6 +2068,10 @@ fn configured_permission_set(args: &Args) -> M1PermissionSet {
         write_host_clipboard: args.clipboard == ClipboardMode::Bidirectional,
         send_file_to_viewer: args.send_file.is_some(),
         receive_file_from_viewer: args.recv_file_dir.is_some(),
+        // The daemon has no read-only compute request handler yet. Keep the
+        // new session tier denied until explicit UI/operator consent is added
+        // together with that handler.
+        execute_read_only_workload: false,
     }
 }
 
@@ -7055,7 +7066,7 @@ mod audio_tests {
         assert_eq!(
             m1_consent_scope(&args),
             "display: screen stream; telemetry: basic host performance; audio: off; \
-             input: off; clipboard: off; file-transfer: off"
+             input: off; clipboard: off; file-transfer: off; read-only-workload: off"
         );
     }
 
@@ -7067,7 +7078,7 @@ mod audio_tests {
         assert_eq!(
             m1_consent_scope(&args),
             "display: screen stream; telemetry: system identity and performance; \
-             audio: host device capture; input: off; clipboard: off; file-transfer: off"
+             audio: host device capture; input: off; clipboard: off; file-transfer: off; read-only-workload: off"
         );
     }
 
@@ -7083,7 +7094,7 @@ mod audio_tests {
             m1_consent_scope(&args),
             "display: screen stream; telemetry: off; audio: off; \
              input: viewer may inject; clipboard: bidirectional; \
-             file-transfer: bidirectional"
+             file-transfer: bidirectional; read-only-workload: off"
         );
     }
 
@@ -7199,6 +7210,7 @@ mod consent_scope_tests {
         assert!(!granted.write_host_clipboard);
         assert!(!granted.send_file_to_viewer);
         assert!(!granted.receive_file_from_viewer);
+        assert!(!granted.execute_read_only_workload);
     }
 
     #[test]
@@ -7207,6 +7219,7 @@ mod consent_scope_tests {
         assert!(configured_permission_set(&input).inject_input);
         assert!(!configured_permission_set(&input).read_host_clipboard);
         assert!(!configured_permission_set(&input).write_host_clipboard);
+        assert!(!configured_permission_set(&input).execute_read_only_workload);
 
         let clip = args_with(
             InputBackendChoice::Noop,
