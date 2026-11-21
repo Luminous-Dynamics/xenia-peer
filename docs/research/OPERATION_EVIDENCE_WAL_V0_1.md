@@ -13,7 +13,7 @@
 - Synchronous `sync_data` after each appended record.
 - Unix file creation mode 0600 and parent-directory sync when the WAL and writer lock are created.
 - Create-new single-writer lock file; two live writers cannot open the same path.
-- Strict per-record, total-file, operation-count and event-count bounds.
+- Strict per-record, total-file, operation-count and event-count bounds. The WAL also reserves worst-case bytes for each still-required terminal/reconciliation event, so a full log cannot consume the space needed to recover an attempted effect to UNKNOWN.
 - Full replay and hash/state verification on open.
 - Only an incomplete final frame is truncated to the last verified offset; complete malformed or hash-invalid records fail closed.
 - After recovery, any operation whose latest known stage is Attempted is durably advanced to Unknown before the journal is returned to the caller.
@@ -38,7 +38,7 @@ Do not infer authorization from the journal; the WAL is evidence, not a permissi
 
 - A partial final four-byte length prefix or partial final record payload is treated as a torn tail and truncated to the previous fully verified record boundary.
 - A complete frame with malformed Bincode, unsupported schema, invalid sequence, session/clock mismatch, broken previous-hash link, bad record hash, or invalid state transition fails closed. Interior corruption is never skipped.
-- A complete Attempted record with no terminal owner result is recovered as UNKNOWN. The recovery receipt digest is domain-separated and binds operation ID, operation sequence and previous WAL hash.
+- A complete Attempted record with no terminal owner result is recovered as UNKNOWN. The recovery receipt digest is domain-separated and binds operation ID, operation sequence and previous WAL hash. The journal reserves both event slots and worst-case WAL bytes for this terminal/reconciliation path before admitting new operations.
 - UNKNOWN prevents `mark_attempted` from succeeding again. A verified reconciliation receipt must resolve the same operation ID first.
 - Exact duplicate admission is idempotent. Reusing an ID with a different operation sequence or context is rejected.
 - The journal uses a caller-supplied persistent `clock_domain` and logical monotonic `at_ticks`; these values must continue across restart. They are not wall-clock timestamps.
@@ -48,7 +48,7 @@ Do not infer authorization from the journal; the WAL is evidence, not a permissi
 | Bound | Value |
 |---|---:|
 | WAL schema | v1 |
-| Maximum serialized record | 16 KiB |
+| Maximum serialized record | 1 KiB |
 | Maximum journal size | 32 MiB |
 | Operations/session | 4,096 (from PR #531) |
 | Stage events/session | 32,768 (from PR #531) |
