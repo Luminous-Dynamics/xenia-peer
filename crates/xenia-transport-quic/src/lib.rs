@@ -574,8 +574,7 @@ mod tests {
         let mut stream = FakeStream::default();
         let mut terminal = false;
         {
-            let mut guard =
-                StreamSideGuard::new(&mut stream, &mut terminal, terminate_fake_stream);
+            let mut guard = StreamSideGuard::new(&mut stream, &mut terminal, terminate_fake_stream);
             guard.stream_mut().operations += 1;
         }
         assert!(stream.terminated);
@@ -588,8 +587,7 @@ mod tests {
         let mut stream = FakeStream::default();
         let mut terminal = false;
         {
-            let mut guard =
-                StreamSideGuard::new(&mut stream, &mut terminal, terminate_fake_stream);
+            let mut guard = StreamSideGuard::new(&mut stream, &mut terminal, terminate_fake_stream);
             guard.stream_mut().operations += 1;
             guard.complete();
         }
