@@ -6592,7 +6592,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         m1_runtime.with_host_clipboard_write_effect(|| {
                             apply_clipboard_content(&clipboard.content)
                         })
-                    }?;
+                    };
+                    let write_execution = match write_execution {
+                        Ok(result) => result,
+                        Err(err) => {
+                            warn!(
+                                error = %err,
+                                "clipboard update rejected by M1 consent gate"
+                            );
+                            continue;
+                        }
+                    };
                     match write_execution {
                         crate::m1_runtime::HostClipboardWriteExecution::Applied => {
                             info!(
@@ -7066,7 +7076,7 @@ fn run_m1_runtime_smoke(
     runtime.offer()?;
     runtime.grant_consent()?;
     runtime.stream_frame()?;
-    runtime.inject_input()?;
+    runtime.admit_input()?;
     runtime.revoke()?;
     runtime.verify(&verifying_key)?;
 
