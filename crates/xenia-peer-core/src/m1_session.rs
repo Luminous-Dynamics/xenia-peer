@@ -976,9 +976,15 @@ mod tests {
         }).unwrap();
 
         session.inject_input().unwrap();
-        session.record_input_effect_outcome(M1InputEffectOutcome::PlatformAccepted).unwrap();
-        session.record_input_effect_outcome(M1InputEffectOutcome::OutcomeUnknown).unwrap();
-        session.record_input_effect_outcome(M1InputEffectOutcome::NotAttempted).unwrap();
+        session
+            .record_input_effect_outcome(M1InputEffectOutcome::PlatformAccepted)
+            .unwrap();
+        session
+            .record_input_effect_outcome(M1InputEffectOutcome::OutcomeUnknown)
+            .unwrap();
+        session
+            .record_input_effect_outcome(M1InputEffectOutcome::NotAttempted)
+            .unwrap();
 
         assert_eq!(
             &session.audit()[2..],
