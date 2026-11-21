@@ -553,10 +553,10 @@ mod tests {
     #[test]
     fn terminal_stream_side_rejects_every_subsequent_operation() {
         assert!(ensure_stream_side_open(false).is_ok());
-        assert_eq!(
+        assert!(matches!(
             ensure_stream_side_open(true),
             Err(TransportError::UnexpectedEof)
-        );
+        ));
     }
 
     #[derive(Default)]
