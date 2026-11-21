@@ -1297,6 +1297,26 @@ mod tests {
     }
 
     #[test]
+    fn identical_admission_is_idempotent_without_a_second_wal_record() {
+        let dir = temp_dir();
+        let path = dir.join("session.wal");
+        let session = [12; 32];
+        let mut journal = DurableOperationEvidenceJournal::open(&path, session, 111).unwrap();
+        let first = journal
+            .admit(operation_id(12), 1, context(session), 1, [120; 32])
+            .unwrap();
+        let before = journal.journal_sequence();
+        let repeated = journal
+            .admit(operation_id(12), 1, context(session), 2, [121; 32])
+            .unwrap();
+        assert!(matches!(first, AdmissionResult::Created(_)));
+        assert!(matches!(repeated, AdmissionResult::AlreadyPresent(_)));
+        assert_eq!(journal.journal_sequence(), before);
+        drop(journal);
+        cleanup(&path);
+    }
+
+    #[test]
     fn conflicting_operation_id_reuse_is_rejected() {
         let dir = temp_dir();
         let path = dir.join("session.wal");
