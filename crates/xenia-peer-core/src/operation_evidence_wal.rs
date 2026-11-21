@@ -31,7 +31,7 @@ use crate::operation_evidence::{
 /// Durable WAL schema version. A future incompatible record layout must bump it.
 pub const OPERATION_WAL_SCHEMA_VERSION: u16 = 1;
 /// Maximum serialized WAL body size, excluding the four-byte frame prefix.
-pub const MAX_OPERATION_WAL_RECORD_BYTES: usize = 16 * 1024;
+pub const MAX_OPERATION_WAL_RECORD_BYTES: usize = 1024;
 /// Maximum bytes in one session WAL. Capacity exhaustion fails closed.
 pub const MAX_OPERATION_WAL_BYTES: u64 = 32 * 1024 * 1024;
 
@@ -340,6 +340,12 @@ fn recovery_unknown_digest(
     hasher.update(&operation_sequence.to_le_bytes());
     hasher.update(&last_record_hash);
     *hasher.finalize().as_bytes()
+}
+
+fn reserved_wal_bytes_for_test(slots: usize) -> u64 {
+    u64::try_from(slots)
+        .unwrap_or(u64::MAX)
+        .saturating_mul(4_u64.saturating_add(MAX_OPERATION_WAL_RECORD_BYTES as u64))
 }
 
 fn reserved_event_slots_for_state(state: OperationState) -> usize {
@@ -810,6 +816,33 @@ impl DurableOperationEvidenceJournal {
         })
     }
 
+    fn ensure_wal_capacity_with_reserved_slots(
+        &self,
+        reserved_slots_after: usize,
+    ) -> Result<(), DurableOperationJournalError> {
+        let frame_and_record_bytes = 4_u64
+            .checked_add(
+                u64::try_from(MAX_OPERATION_WAL_RECORD_BYTES)
+                    .map_err(|_| DurableOperationJournalError::CapacityFull)?,
+            )
+            .ok_or(DurableOperationJournalError::CapacityFull)?;
+        let reserved_bytes = u64::try_from(reserved_slots_after)
+            .ok()
+            .and_then(|slots| slots.checked_mul(frame_and_record_bytes))
+            .ok_or(DurableOperationJournalError::CapacityFull)?;
+        let required = self
+            .file
+            .metadata()?
+            .len()
+            .checked_add(frame_and_record_bytes)
+            .and_then(|value| value.checked_add(reserved_bytes))
+            .ok_or(DurableOperationJournalError::CapacityFull)?;
+        if required > MAX_OPERATION_WAL_BYTES {
+            return Err(DurableOperationJournalError::CapacityFull);
+        }
+        Ok(())
+    }
+
     fn ensure_capacity_for_admission(&self) -> Result<(), DurableOperationJournalError> {
         let reserved = self.reserved_event_slots()?;
         let required = self
@@ -825,7 +858,10 @@ impl DurableOperationEvidenceJournal {
         if required > super::operation_evidence::MAX_OPERATION_EVENTS {
             return Err(DurableOperationJournalError::CapacityFull);
         }
-        Ok(())
+        let reserved_after = reserved
+            .checked_add(reserved_event_slots_for_state(OperationState::Admitted))
+            .ok_or(DurableOperationJournalError::CapacityFull)?;
+        self.ensure_wal_capacity_with_reserved_slots(reserved_after)
     }
 
     fn ensure_capacity_for_transition(
@@ -851,7 +887,11 @@ impl DurableOperationEvidenceJournal {
         if required > super::operation_evidence::MAX_OPERATION_EVENTS {
             return Err(DurableOperationJournalError::CapacityFull);
         }
-        Ok(())
+        let reserved_after = reserved
+            .checked_sub(reserved_event_slots_for_state(current.state))
+            .and_then(|value| value.checked_add(reserved_event_slots_for_state(next_state)))
+            .ok_or(DurableOperationJournalError::CapacityFull)?;
+        self.ensure_wal_capacity_with_reserved_slots(reserved_after)
     }
 
     fn require_state(
@@ -1443,6 +1483,19 @@ mod tests {
         ));
         drop(journal);
         cleanup(&path);
+    }
+
+    #[test]
+    fn reserved_wal_space_covers_each_terminal_and_reconciliation_slot() {
+        let frame_and_record =
+            4_u64.saturating_add(MAX_OPERATION_WAL_RECORD_BYTES as u64);
+        assert_eq!(
+            u64::try_from(3_usize)
+                .unwrap_or(u64::MAX)
+                .saturating_mul(frame_and_record),
+            reserved_wal_bytes_for_test(3)
+        );
+        assert!(MAX_OPERATION_WAL_RECORD_BYTES <= 1024);
     }
 
     #[test]
