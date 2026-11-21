@@ -148,14 +148,16 @@ mod tests {
                 disposition_for_m1_event(event),
                 M1LedgerDisposition::Skip(M1LedgerSkipReason::NotConsentBoundary)
             );
-            assert!(consent_record_for_m1_event(
-                [1; 32],
-                Uuid::from_bytes([2; 16]),
-                Uuid::from_bytes([3; 16]),
-                "view screen",
-                event,
-            )
-            .is_none());
+            assert!(
+                consent_record_for_m1_event(
+                    [1; 32],
+                    Uuid::from_bytes([2; 16]),
+                    Uuid::from_bytes([3; 16]),
+                    "view screen",
+                    event,
+                )
+                .is_none()
+            );
         }
     }
 
