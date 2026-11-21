@@ -4,7 +4,7 @@
   "issue": 545,
   "base_pr": 531,
   "bounds": {
-    "max_record_bytes": 16384,
+    "max_record_bytes": 1024,
     "max_journal_bytes": 33554432,
     "max_operations": 4096,
     "max_events": 32768
@@ -26,7 +26,9 @@
     "identical_admission_idempotent": true,
     "single_writer_lock": true,
     "consent_ledger_not_modified": true,
-    "no_raw_payloads": true
+    "no_raw_payloads": true,
+    "reserve_event_slots_for_nonterminal_states": true,
+    "reserve_worst_case_bytes_for_terminal_and_reconciliation_records": true
   },
   "scenarios": [
     {
@@ -163,6 +165,16 @@
       "id": "WAL-027",
       "name": "non-unix-directory-durability",
       "expected": "NoProductionClaimWithoutPlatformQualification"
+    },
+    {
+      "id": "WAL-028",
+      "name": "event-capacity-near-limit-with-attempted-operation",
+      "expected": "AdmissionStopsBeforeRecoverySlotExhaustion"
+    },
+    {
+      "id": "WAL-029",
+      "name": "byte-capacity-near-limit-with-attempted-operation",
+      "expected": "AdmissionStopsBeforeTerminalUnknownRecordCannotFit"
     }
   ],
   "measured_results": null
