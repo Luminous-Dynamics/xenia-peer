@@ -342,6 +342,21 @@ fn recovery_unknown_digest(
     *hasher.finalize().as_bytes()
 }
 
+fn reserved_event_slots_for_state(state: OperationState) -> usize {
+    match state {
+        OperationState::Admitted => 3,
+        OperationState::Attempted => 2,
+        OperationState::Committed
+        | OperationState::Unknown
+        | OperationState::ReconciledCommitted => 1,
+        OperationState::Observed
+        | OperationState::Rejected
+        | OperationState::NotCommitted
+        | OperationState::ReconciledNotCommitted
+        | OperationState::ReconciledObserved => 0,
+    }
+}
+
 /// A durable, single-writer operation journal backed by a framed binary WAL.
 ///
 /// A successful `admit` or `mark_attempted` call returns only after
@@ -488,6 +503,7 @@ impl DurableOperationEvidenceJournal {
         if self.operation_ids.len() >= super::operation_evidence::MAX_OPERATION_RECORDS {
             return Err(DurableOperationJournalError::CapacityFull);
         }
+        self.ensure_capacity_for_admission()?;
         let persisted_context = PersistedOperationContext::try_from(context)?;
         self.append_command(
             WalCommand::Admit {
@@ -530,6 +546,10 @@ impl DurableOperationEvidenceJournal {
             &[OperationState::Admitted],
             crate::operation_evidence::OperationEventKind::EffectAttempted,
         )?;
+        self.ensure_capacity_for_transition(
+            operation_id,
+            OperationState::Attempted,
+        )?;
         self.append_command(WalCommand::Attempted {
             operation_id: operation_id.0,
             at_ticks,
@@ -555,6 +575,10 @@ impl DurableOperationEvidenceJournal {
             operation_id,
             &[OperationState::Attempted],
             crate::operation_evidence::OperationEventKind::EffectCommitted,
+        )?;
+        self.ensure_capacity_for_transition(
+            operation_id,
+            OperationState::Committed,
         )?;
         self.append_command(WalCommand::Committed {
             operation_id: operation_id.0,
@@ -589,6 +613,10 @@ impl DurableOperationEvidenceJournal {
                 },
             ));
         }
+        self.ensure_capacity_for_transition(
+            operation_id,
+            OperationState::Observed,
+        )?;
         self.append_command(WalCommand::Observed {
             operation_id: operation_id.0,
             at_ticks,
@@ -613,6 +641,10 @@ impl DurableOperationEvidenceJournal {
             operation_id,
             &[OperationState::Admitted],
             crate::operation_evidence::OperationEventKind::Rejected,
+        )?;
+        self.ensure_capacity_for_transition(
+            operation_id,
+            OperationState::Rejected,
         )?;
         self.append_command(WalCommand::Rejected {
             operation_id: operation_id.0,
@@ -639,6 +671,10 @@ impl DurableOperationEvidenceJournal {
             &[OperationState::Attempted],
             crate::operation_evidence::OperationEventKind::EffectNotCommitted,
         )?;
+        self.ensure_capacity_for_transition(
+            operation_id,
+            OperationState::NotCommitted,
+        )?;
         self.append_command(WalCommand::NotCommitted {
             operation_id: operation_id.0,
             at_ticks,
@@ -664,6 +700,10 @@ impl DurableOperationEvidenceJournal {
             operation_id,
             &[OperationState::Attempted],
             crate::operation_evidence::OperationEventKind::Unknown,
+        )?;
+        self.ensure_capacity_for_transition(
+            operation_id,
+            OperationState::Unknown,
         )?;
         self.append_command(WalCommand::Unknown {
             operation_id: operation_id.0,
@@ -702,6 +742,12 @@ impl DurableOperationEvidenceJournal {
                 OperationEvidenceError::ReconciliationConflict,
             ));
         }
+        let next_state = match outcome {
+            ReconciliationOutcome::NotCommitted => OperationState::ReconciledNotCommitted,
+            ReconciliationOutcome::Committed => OperationState::ReconciledCommitted,
+            ReconciliationOutcome::Observed => OperationState::ReconciledObserved,
+        };
+        self.ensure_capacity_for_transition(operation_id, next_state)?;
         self.append_command(WalCommand::Reconcile {
             operation_id: operation_id.0,
             outcome: outcome.into(),
@@ -753,6 +799,59 @@ impl DurableOperationEvidenceJournal {
     /// Verify the replayed in-memory operation chain.
     pub fn verify_operation_chain(&self) -> bool {
         !self.poisoned && self.ledger.verify_chain()
+    }
+
+    fn reserved_event_slots(&self) -> Result<usize, DurableOperationJournalError> {
+        self.operation_ids.iter().try_fold(0_usize, |total, operation_id| {
+            let snapshot = self.ledger.snapshot(*operation_id)?;
+            total
+                .checked_add(reserved_event_slots_for_state(snapshot.state))
+                .ok_or(DurableOperationJournalError::CapacityFull)
+        })
+    }
+
+    fn ensure_capacity_for_admission(&self) -> Result<(), DurableOperationJournalError> {
+        let reserved = self.reserved_event_slots()?;
+        let required = self
+            .ledger
+            .events()
+            .len()
+            .checked_add(1)
+            .and_then(|value| value.checked_add(reserved))
+            .and_then(|value| {
+                value.checked_add(reserved_event_slots_for_state(OperationState::Admitted))
+            })
+            .ok_or(DurableOperationJournalError::CapacityFull)?;
+        if required > super::operation_evidence::MAX_OPERATION_EVENTS {
+            return Err(DurableOperationJournalError::CapacityFull);
+        }
+        Ok(())
+    }
+
+    fn ensure_capacity_for_transition(
+        &self,
+        operation_id: OperationId,
+        next_state: OperationState,
+    ) -> Result<(), DurableOperationJournalError> {
+        let current = self.ledger.snapshot(operation_id)?;
+        let reserved = self.reserved_event_slots()?;
+        let required = self
+            .ledger
+            .events()
+            .len()
+            .checked_add(1)
+            .and_then(|value| {
+                value.checked_sub(reserved_event_slots_for_state(current.state))
+            })
+            .and_then(|value| {
+                value.checked_add(reserved_event_slots_for_state(next_state))
+            })
+            .and_then(|value| value.checked_add(reserved))
+            .ok_or(DurableOperationJournalError::CapacityFull)?;
+        if required > super::operation_evidence::MAX_OPERATION_EVENTS {
+            return Err(DurableOperationJournalError::CapacityFull);
+        }
+        Ok(())
     }
 
     fn require_state(
@@ -1344,6 +1443,32 @@ mod tests {
         ));
         drop(journal);
         cleanup(&path);
+    }
+
+    #[test]
+    fn lifecycle_states_reserve_terminal_and_reconciliation_event_slots() {
+        assert_eq!(
+            reserved_event_slots_for_state(OperationState::Admitted),
+            3
+        );
+        assert_eq!(
+            reserved_event_slots_for_state(OperationState::Attempted),
+            2
+        );
+        assert_eq!(
+            reserved_event_slots_for_state(OperationState::Unknown),
+            1
+        );
+        assert_eq!(
+            reserved_event_slots_for_state(OperationState::Committed),
+            1
+        );
+        assert_eq!(
+            reserved_event_slots_for_state(OperationState::ReconciledCommitted),
+            1
+        );
+        assert_eq!(reserved_event_slots_for_state(OperationState::Observed), 0);
+        assert_eq!(reserved_event_slots_for_state(OperationState::Rejected), 0);
     }
 
     #[test]
