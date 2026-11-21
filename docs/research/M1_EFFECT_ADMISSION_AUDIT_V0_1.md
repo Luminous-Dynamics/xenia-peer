@@ -1,6 +1,6 @@
 # M1 Permission Admission vs Actual Input Effect Outcome
 
-**Status:** Incremental live-path integration v0.1; the input effect owner is integrated, other operation lanes are relabelled as admission only.
+**Status:** Incremental live-path integration v0.2; synchronous input and host clipboard API owners are integrated. File, frame/video, audio, telemetry and network-delivery outcomes remain separate work.
 **Tracking:** [Xenia #541](https://github.com/Luminous-Dynamics/xenia-peer/issues/541).
 **Related:** #504 local effect/revoke ordering, #508 exact authority, #510 stage evidence, #512 route inventory, #532 gate reference model.
 
@@ -37,6 +37,17 @@ New input owner outcomes:
 
 The input admission and outcome methods are separate. The outcome method also rechecks that the M1 session is still active and the input permission remains granted.
 
+New clipboard owner outcomes:
+- `HostClipboardReadCompleted`: the host clipboard read API completed; it does not mean content was sent to the peer.
+- `HostClipboardReadOutcomeUnknown`: the API returned an error after invocation.
+- `HostClipboardReadNotAttempted`: the API was not invoked, for example when clipboard setup failed.
+- `HostClipboardWriteApplied`: the host OS clipboard write API returned success.
+- `HostClipboardWriteOutcomeUnknown`: the write API returned an error; external application is not assumed absent.
+- `HostClipboardWriteNotAttempted`: no write API call was made, for example because payload size validation or clipboard setup rejected first.
+
+No clipboard bytes or text are stored in the M1 operation event. Only stage and outcome labels are retained.
+
+
 ## 3. Actual input effect-owner integration
 
 The daemon's reverse input path now calls `M1RuntimeSession::with_input_effect`. The caller must hold the shared `Arc<tokio::sync::Mutex<M1RuntimeSession>>` while this method runs.
@@ -58,13 +69,38 @@ This is a **local input-owner linearization**. It is not global distributed revo
 
 `build_input_injector` intentionally falls back to `NoopInjector` when a real backend cannot be constructed. A successful no-op return must not be called platform acceptance. The live path detects `backend_name() == "noop"` and returns `InjectError::Unavailable` through the owner wrapper, producing `InputNotAttempted`.
 
-## 4. Consent ledger boundary
+## 4. Actual host clipboard effect-owner integration
 
-`m1_ledger::disposition_for_m1_event` continues to skip operation events as `NotConsentBoundary`, including all new permission-admission and input-outcome events. The ledger remains reserved for consent request, grant, denial, revoke and violation boundaries.
+Both synchronous host clipboard APIs now run inside their respective `M1RuntimeSession::with_host_clipboard_*_effect` wrapper while the caller holds the shared M1 runtime mutex.
+
+### Host-to-viewer read path
+1. The polling loop first obtains the M1 runtime lock.
+2. The runtime checks `ReadHostClipboard` permission and records `HostClipboardReadPermissionAdmitted`.
+3. Only then does `read_host_clipboard_text` instantiate the clipboard adapter and call `get_text`.
+4. The result is recorded as `Completed(Some(text))`, `Completed(None)`, `NotAttempted`, or `OutcomeUnknown`.
+5. The lock is released. If content changed, the daemon seals it into a clipboard frame and separately checks frame-send permission before sending.
+
+The M1 read receipt establishes only that the local read API completed. It does **not** establish network dispatch, peer receipt, or peer application. Clipboard content never appears in the audit event; only the operation stage is recorded.
+
+### Viewer-to-host write path
+1. The inbound payload is authenticated/decrypted and checked against bidirectional clipboard mode.
+2. The daemon obtains the M1 runtime lock and checks `WriteHostClipboard`.
+3. Only then does the callback call `arboard::Clipboard::new` and `set_text`.
+4. The outcome is recorded as `Applied`, `NotAttempted`, or `OutcomeUnknown` before unlocking.
+
+Oversize payload rejection and clipboard adapter construction failure are `NotAttempted`, because no `set_text` call happened. An error from `set_text` itself is `OutcomeUnknown`; the daemon does not assume the OS or compositor made no change.
+
+The helper logs only the clipboard kind and byte count, never the clipboard content. `Cleared` is applied by setting empty text to replace a previously served selection on Wayland.
+
+Revocation uses the same M1 mutex. Therefore, local revoke cannot linearize between permission admission, the synchronous API call and the corresponding outcome append. This is process-local serialization, not distributed revocation.
+
+## 5. Consent ledger boundary
+
+`m1_ledger::disposition_for_m1_event` continues to skip operation events as `NotConsentBoundary`, including all new permission-admission, input-outcome and clipboard-outcome events. The ledger remains reserved for consent request, grant, denial, revoke and violation boundaries.
 
 The signed/append-only consent ledger must not be inflated into a per-keystroke or per-frame event log. A future durable operation-evidence export can bind operation-stage receipts to the session transcript without rewriting consent semantics (#510/#450).
 
-## 5. Tests authored
+## 6. Tests authored
 
 The current changes add/adjust tests for:
 1. All eight M1 permission methods append admission labels, not legacy success-shaped labels.
@@ -75,18 +111,20 @@ The current changes add/adjust tests for:
 6. Input callback is never invoked without permission.
 7. All new operation/admission/outcome events remain excluded from the human consent journal.
 8. A multithreaded daemon test attempts revoke while an input callback is in progress; revoke must acquire the shared runtime lock only after the callback and outcome append finish.
+9. Host clipboard read/write runtime wrappers record the local API outcome and suppress callbacks when the corresponding permission is absent.
+10. All clipboard outcome events remain excluded from the human consent journal.
 
 These tests are authored, not executed in this environment.
 
-## 6. Remaining live effect owners
+## 7. Remaining live effect owners
 
 This PR intentionally does not claim to solve the other routes yet:
 
 | Route | Admission event now truthful | Effect outcome still needed |
 |---|---|---|
-| Input injection | Yes | Local injector return is recorded |
-| Host clipboard read/disclosure | Permission admission only | Need bind actual read digest and outbound transport acceptance; no clipboard bytes in evidence |
-| Host clipboard write | Permission admission only | Need `arboard::set_text` success/error result and UNKNOWN semantics |
+| Input injection | Yes | Local injector return is recorded; target-app consumption remains unknown |
+| Host clipboard read | Yes | Local read API result is recorded; peer disclosure/receipt remains separate |
+| Host clipboard write | Yes | Local `set_text` API result is recorded; reader application consumption remains unknown |
 | File send | Permission admission only | Per-chunk operation identity and send/peer receipt; timeout becomes UNKNOWN |
 | File receive | Permission admission only | Distinguish offer accepted, chunk staged, digest verified, final publication success |
 | Frame/video | Permission admission only | Local send, peer receipt, decode and presentation remain separate |
@@ -94,10 +132,10 @@ This PR intentionally does not claim to solve the other routes yet:
 
 Do not hold the M1 runtime mutex across an entire async network send or file transfer. Keep the critical section short at the actual synchronous local effect-owner boundary, and reconcile ambiguous network outcomes by stable operation ID.
 
-## 7. Claim boundary
+## 8. Claim boundary
 
-**Implemented in this increment:** truthful permission-admission labels for all eight lanes; post-call synchronous input result labels; no-op/unavailable distinction; shared-lock input/revocation ordering; preserved consent-ledger boundary.
+**Implemented in this increment:** truthful permission-admission labels for all eight lanes; post-call synchronous input and clipboard API result labels; explicit not-attempted vs unknown states; shared-lock input/clipboard vs local revoke ordering; no clipboard content in operation events; preserved consent-ledger boundary.
 
-**Not claimed:** completed clipboard/file/frame/audio/telemetry effect receipts, global/distributed revocation, target-application input acceptance, physical input-to-photon, durable signed operation evidence, compilation, test execution, Clippy, rustfmt or hosted CI pass.
+**Not claimed:** peer-side clipboard receipt/application, file/frame/audio/telemetry effect receipts, global/distributed revocation, target-application input acceptance, physical input-to-photon, durable signed operation evidence, compilation, test execution, Clippy, rustfmt or hosted CI pass.
 
 The reference operation ledger (#531) and gate (#532) remain complementary but are not yet the durable evidence backend for this M1 path.
