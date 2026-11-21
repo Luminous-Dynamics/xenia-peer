@@ -7355,17 +7355,22 @@ mod consent_scope_tests {
 
         let runtime = Arc::new(AsyncMutex::new(runtime));
         let effect_entered = Arc::new(AtomicBool::new(false));
+        let revoke_attempting = Arc::new(AtomicBool::new(false));
         let effect_finished = Arc::new(AtomicBool::new(false));
 
         let input_runtime = Arc::clone(&runtime);
         let input_entered = Arc::clone(&effect_entered);
+        let input_revoke_attempting = Arc::clone(&revoke_attempting);
         let input_finished = Arc::clone(&effect_finished);
         let input_task = tokio::spawn(async move {
             let mut runtime = input_runtime.lock().await;
             runtime
                 .with_input_effect(|| {
                     input_entered.store(true, Ordering::SeqCst);
-                    std::thread::sleep(Duration::from_millis(75));
+                    while !input_revoke_attempting.load(Ordering::SeqCst) {
+                        std::thread::yield_now();
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
                     input_finished.store(true, Ordering::SeqCst);
                     crate::m1_runtime::InputEffectExecution::PlatformAccepted
                 })
@@ -7374,11 +7379,13 @@ mod consent_scope_tests {
 
         let revoke_runtime = Arc::clone(&runtime);
         let revoke_entered = Arc::clone(&effect_entered);
+        let revoke_attempting_flag = Arc::clone(&revoke_attempting);
         let revoke_finished = Arc::clone(&effect_finished);
         let revoke_task = tokio::spawn(async move {
             while !revoke_entered.load(Ordering::SeqCst) {
                 tokio::task::yield_now().await;
             }
+            revoke_attempting_flag.store(true, Ordering::SeqCst);
             let mut runtime = revoke_runtime.lock().await;
             let effect_was_finished = revoke_finished.load(Ordering::SeqCst);
             runtime
