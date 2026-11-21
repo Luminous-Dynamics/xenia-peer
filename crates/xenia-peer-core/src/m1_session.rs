@@ -970,10 +970,12 @@ mod tests {
     fn input_effect_outcomes_are_distinct_from_permission_admission() {
         let mut session = M1SessionMachine::new();
         session.offer().unwrap();
-        session.grant_consent_scoped(M1PermissionSet {
-            inject_input: true,
-            ..M1PermissionSet::default()
-        }).unwrap();
+        session
+            .grant_consent_scoped(M1PermissionSet {
+                inject_input: true,
+                ..M1PermissionSet::default()
+            })
+            .unwrap();
 
         session.inject_input().unwrap();
         session
