@@ -19,7 +19,6 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
-use bincode::Options;
 use serde::{Deserialize, Serialize};
 
 use crate::m1_session::M1Permission;
@@ -278,19 +277,6 @@ enum WalCommand {
 }
 
 impl WalCommand {
-    fn operation_id(self) -> [u8; 16] {
-        match self {
-            Self::Admit { operation_id, .. }
-            | Self::Attempted { operation_id, .. }
-            | Self::Committed { operation_id, .. }
-            | Self::Observed { operation_id, .. }
-            | Self::Rejected { operation_id, .. }
-            | Self::NotCommitted { operation_id, .. }
-            | Self::Unknown { operation_id, .. }
-            | Self::Reconcile { operation_id, .. } => operation_id,
-        }
-    }
-
     fn at_ticks(self) -> u64 {
         match self {
             Self::Admit { at_ticks, .. }
@@ -519,11 +505,12 @@ impl DurableOperationEvidenceJournal {
             at_ticks,
             evidence_digest,
         })?;
-        self.apply_or_poison(self.ledger.mark_attempted(
+        let result = self.ledger.mark_attempted(
             operation_id,
             at_ticks,
             evidence_digest,
-        ))
+        );
+        self.apply_or_poison(result)
     }
 
     /// Persist a local effect-owner commit receipt. If the append/sync fails,
@@ -540,11 +527,12 @@ impl DurableOperationEvidenceJournal {
             at_ticks,
             evidence_digest: owner_receipt_digest,
         })?;
-        self.apply_or_poison(self.ledger.mark_committed(
+        let result = self.ledger.mark_committed(
             operation_id,
             at_ticks,
             owner_receipt_digest,
-        ))
+        );
+        self.apply_or_poison(result)
     }
 
     /// Persist an independently established observation receipt.
@@ -571,11 +559,12 @@ impl DurableOperationEvidenceJournal {
             at_ticks,
             evidence_digest: observation_receipt_digest,
         })?;
-        self.apply_or_poison(self.ledger.mark_observed(
+        let result = self.ledger.mark_observed(
             operation_id,
             at_ticks,
             observation_receipt_digest,
-        ))
+        );
+        self.apply_or_poison(result)
     }
 
     /// Persist rejection before the effect owner is invoked.
@@ -591,11 +580,12 @@ impl DurableOperationEvidenceJournal {
             at_ticks,
             evidence_digest: rejection_evidence_digest,
         })?;
-        self.apply_or_poison(self.ledger.mark_rejected(
+        let result = self.ledger.mark_rejected(
             operation_id,
             at_ticks,
             rejection_evidence_digest,
-        ))
+        );
+        self.apply_or_poison(result)
     }
 
     /// Persist a definitive post-attempt non-commit receipt.
@@ -611,11 +601,12 @@ impl DurableOperationEvidenceJournal {
             at_ticks,
             evidence_digest,
         })?;
-        self.apply_or_poison(self.ledger.mark_not_committed(
+        let result = self.ledger.mark_not_committed(
             operation_id,
             at_ticks,
             evidence_digest,
-        ))
+        );
+        self.apply_or_poison(result)
     }
 
     /// Persist an ambiguous result. UNKNOWN blocks unsafe retry until an
@@ -632,11 +623,12 @@ impl DurableOperationEvidenceJournal {
             at_ticks,
             evidence_digest,
         })?;
-        self.apply_or_poison(self.ledger.mark_unknown(
+        let result = self.ledger.mark_unknown(
             operation_id,
             at_ticks,
             evidence_digest,
-        ))
+        );
+        self.apply_or_poison(result)
     }
 
     /// Persist reconciliation of an UNKNOWN outcome. Replaying the same
@@ -668,12 +660,13 @@ impl DurableOperationEvidenceJournal {
             at_ticks,
             receipt_digest,
         })?;
-        self.apply_or_poison(self.ledger.reconcile_unknown(
+        let result = self.ledger.reconcile_unknown(
             operation_id,
             outcome,
             at_ticks,
             receipt_digest,
-        ))
+        );
+        self.apply_or_poison(result)
     }
 
     /// Read the latest state of one operation.
@@ -856,6 +849,7 @@ impl DurableOperationEvidenceJournal {
                 })?;
             self.verify_record(&record)?;
             self.replay_command(record.body.command)?;
+            self.last_record_hash = record.record_hash;
             valid_bytes = valid_bytes.saturating_add(4 + record_len as u64);
         }
 
@@ -878,10 +872,14 @@ impl DurableOperationEvidenceJournal {
             .journal_sequence
             .checked_add(1)
             .ok_or(DurableOperationJournalError::SequenceExhausted)?;
+        if record.body.session_fingerprint != self.session_fingerprint {
+            return Err(DurableOperationJournalError::SessionFingerprintMismatch);
+        }
+        if record.body.clock_domain != self.clock_domain {
+            return Err(DurableOperationJournalError::ClockDomainMismatch);
+        }
         if record.body.journal_sequence != expected_sequence
             || record.body.previous_hash != self.last_record_hash
-            || record.body.session_fingerprint != self.session_fingerprint
-            || record.body.clock_domain != self.clock_domain
             || record.record_hash != wal_record_hash(&record.body)?
         {
             return Err(DurableOperationJournalError::CorruptRecord {
@@ -1065,8 +1063,11 @@ fn create_writer_lock(path: &Path) -> Result<File, DurableOperationJournalError>
         }
     })?;
     let process_id = std::process::id().to_le_bytes();
-    file.write_all(&process_id)?;
-    file.sync_all()?;
+    if let Err(error) = file.write_all(&process_id).and_then(|()| file.sync_all()) {
+        drop(file);
+        let _ = fs::remove_file(path);
+        return Err(DurableOperationJournalError::Io(error));
+    }
     Ok(file)
 }
 
