@@ -1,0 +1,286 @@
+{
+  "schema": "xenia-external-interaction-benchmark/v1",
+  "status": "preregistered_workloads_no_measured_results",
+  "issue": 543,
+  "systems": [
+    {
+      "id": "X0",
+      "name": "Xenia current single-stream",
+      "role": "baseline"
+    },
+    {
+      "id": "X1",
+      "name": "Xenia single-stream WDRR and bounded fragments",
+      "role": "application-scheduler ablation"
+    },
+    {
+      "id": "X2",
+      "name": "Xenia multistream equal priority and WDRR",
+      "role": "transport-multiplexing ablation"
+    },
+    {
+      "id": "X3",
+      "name": "Xenia multistream coarse tiers and WDRR",
+      "role": "candidate"
+    },
+    {
+      "id": "X4",
+      "name": "Xenia multistream fine priorities and WDRR",
+      "role": "priority-granularity ablation"
+    },
+    {
+      "id": "S0",
+      "name": "Sunshine plus Moonlight",
+      "role": "open streaming comparator"
+    },
+    {
+      "id": "P0",
+      "name": "Parsec",
+      "role": "commercial streaming comparator"
+    },
+    {
+      "id": "R0",
+      "name": "Microsoft RDP",
+      "role": "separate enterprise productivity comparator"
+    }
+  ],
+  "primary_endpoints": [
+    "external_client_input_to_client_photon_p50_p95_p99_max",
+    "host_receive_to_platform_injector_return",
+    "host_application_visible_response",
+    "host_capture_to_client_photon",
+    "video_quality_and_goodput_at_matched_quality",
+    "control_event_loss_duplication_reordering_and_staleness"
+  ],
+  "proposed_targets": {
+    "wired_1080p60_lan": {
+      "input_to_photon_p50_ms": 12,
+      "input_to_photon_p95_ms": 20,
+      "input_to_photon_p99_ms": 30,
+      "encode_p95_ms": 8,
+      "decode_p95_ms": 8,
+      "clean_lan_frame_loss_percent": 0.1
+    },
+    "media_plus_bulk_at_90pct": {
+      "input_to_photon_p95_ms": 25,
+      "input_to_photon_p99_ms": 40,
+      "min_control_p99_improvement_vs_X0_percent": 30,
+      "max_video_goodput_loss_percent": 5,
+      "zero_wdrr_starvation_under_assumptions": true
+    },
+    "revoke_to_local_effect_quiescence_p99_ms": 20,
+    "impaired_path": {
+      "frame_loss_percent": 1,
+      "partial_frame_presentation": 0,
+      "silent_accepted_control_loss": 0
+    },
+    "profile_120hz": "separate_targets_required",
+    "status": "targets_not_measurements"
+  },
+  "network_cells": {
+    "rtt_ms": [
+      1,
+      5,
+      15,
+      30,
+      60,
+      100
+    ],
+    "jitter_ms": [
+      0,
+      1,
+      5,
+      15,
+      30
+    ],
+    "bottleneck_utilization_percent": [
+      50,
+      75,
+      90,
+      100
+    ],
+    "loss": [
+      "none",
+      "random",
+      "burst"
+    ],
+    "additional": [
+      "reordering",
+      "reverse_path_congestion",
+      "capacity_step_down",
+      "capacity_recovery",
+      "long_lived_tcp_cross_traffic",
+      "equal_rtt_competitors",
+      "unequal_rtt_competitors",
+      "direct_p2p",
+      "relay_turn",
+      "enterprise_proxy_bypass"
+    ]
+  },
+  "repeatability": {
+    "minimum_independent_runs_per_principal_cell": 30,
+    "paired_runs": true,
+    "randomize_product_order": true,
+    "publish_all_runs": true,
+    "publish_failed_runs": true
+  },
+  "measurement": {
+    "input_trigger": "electrical or deterministic USB HID actuator",
+    "photon_sensor": "photodiode with shared acquisition clock; high-speed camera as cross-check",
+    "require_calibration_uncertainty": true,
+    "do_not_substitute_rtt_for_input_to_photon": true,
+    "do_not_sum_stage_medians_into_end_to_end_percentile": true
+  },
+  "scenarios": [
+    {
+      "id": "XEB-001",
+      "name": "wired-lan-pointer-echo-1080p60",
+      "expected": "external-input-to-photon-baseline"
+    },
+    {
+      "id": "XEB-002",
+      "name": "wired-lan-text-heavy-ui-1080p60",
+      "expected": "text-legibility-and-interaction-latency"
+    },
+    {
+      "id": "XEB-003",
+      "name": "wired-lan-typing-and-key-transitions",
+      "expected": "control-transition-reliability"
+    },
+    {
+      "id": "XEB-004",
+      "name": "wired-lan-high-motion-video",
+      "expected": "matched-quality-latency-goodput-and-quality"
+    },
+    {
+      "id": "XEB-005",
+      "name": "90pct-bottleneck-video-plus-bulk",
+      "expected": "control-tail-latency-under-saturation"
+    },
+    {
+      "id": "XEB-006",
+      "name": "90pct-bottleneck-sparse-control",
+      "expected": "control-starvation-and-scheduler-ablation"
+    },
+    {
+      "id": "XEB-007",
+      "name": "random-loss-and-jitter",
+      "expected": "frame-loss-recovery-and-tail-latency"
+    },
+    {
+      "id": "XEB-008",
+      "name": "burst-loss-and-reordering",
+      "expected": "recovery-and-stale-frame-age"
+    },
+    {
+      "id": "XEB-009",
+      "name": "capacity-step-down-and-recovery",
+      "expected": "adaptive-rate-and-queue-drain"
+    },
+    {
+      "id": "XEB-010",
+      "name": "reverse-path-congestion",
+      "expected": "input-and-ack-feedback-degradation"
+    },
+    {
+      "id": "XEB-011",
+      "name": "clipboard-read-write-under-video-load",
+      "expected": "directional-permission-and-effect-stage-latency"
+    },
+    {
+      "id": "XEB-012",
+      "name": "bulk-file-transfer-under-control-load",
+      "expected": "file-goodput-vs-interaction-tail-latency"
+    },
+    {
+      "id": "XEB-013",
+      "name": "rekey-during-active-interaction",
+      "expected": "no-stale-or-cross-epoch-effect"
+    },
+    {
+      "id": "XEB-014",
+      "name": "reconnect-with-unknown-operation",
+      "expected": "unknown-reconciliation-without-duplicate-effect"
+    },
+    {
+      "id": "XEB-015",
+      "name": "local-revoke-during-input-effect",
+      "expected": "local-linearization-and-quiescence"
+    },
+    {
+      "id": "XEB-016",
+      "name": "direct-p2p-vs-relay",
+      "expected": "route-specific-latency-and-failure-rate"
+    },
+    {
+      "id": "XEB-017",
+      "name": "tcp-vs-udp-or-quic-profile",
+      "expected": "transport-specific-tail-and-reliability"
+    },
+    {
+      "id": "XEB-018",
+      "name": "1440p120-high-motion",
+      "expected": "separately-qualified-high-refresh-profile"
+    },
+    {
+      "id": "XEB-019",
+      "name": "competing-equal-rtt-sessions",
+      "expected": "session-fairness-and-resource-sharing"
+    },
+    {
+      "id": "XEB-020",
+      "name": "competing-unequal-rtt-sessions",
+      "expected": "RTT-fairness-and-goodput"
+    },
+    {
+      "id": "XEB-021",
+      "name": "client-decode-overload",
+      "expected": "decode-queue-and-render-queue-decomposition"
+    },
+    {
+      "id": "XEB-022",
+      "name": "host-encode-overload",
+      "expected": "encode-queue-and-drop-decomposition"
+    },
+    {
+      "id": "XEB-023",
+      "name": "display-refresh-phase-sweep",
+      "expected": "display-scanout-and-vsync-phase"
+    },
+    {
+      "id": "XEB-024",
+      "name": "input-device-actuator-calibration",
+      "expected": "trigger-to-device-event uncertainty bound"
+    },
+    {
+      "id": "XEB-025",
+      "name": "photodiode-trigger-calibration",
+      "expected": "photon-transition detection uncertainty bound"
+    },
+    {
+      "id": "XEB-026",
+      "name": "product-overlay-metric-definition-audit",
+      "expected": "no cross-product comparison of non-equivalent counters"
+    }
+  ],
+  "measured_results": null,
+  "evidence_artifacts": [
+    "software version and build IDs",
+    "hardware inventory",
+    "OS and driver versions",
+    "configuration hashes",
+    "workload trace hashes",
+    "network impairment seeds",
+    "raw actuator/photon traces",
+    "packet captures where lawful",
+    "full run denominator and failures",
+    "confidence intervals and calibration uncertainty"
+  ],
+  "claim_rules": [
+    "vendor claims are context not matched results",
+    "no RTT substitution for input_to_photon",
+    "no stage_median summation",
+    "RDP separate when workload not comparable",
+    "no SOTA_claim_without_matched_external_independent_runs"
+  ]
+}
