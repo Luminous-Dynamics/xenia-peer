@@ -1,0 +1,395 @@
+{
+  "schema": "xenia-durable-operation-journal/v1",
+  "status": "preregistered-crash-and-effect-fault-corpus",
+  "issue": 545,
+  "dependencies": [
+    "#510",
+    "#531",
+    "#532",
+    "#542",
+    "#450"
+  ],
+  "invariants": {
+    "authorization_and_attempt_durable_before_dispatch": true,
+    "owner_outcome_durable_before_unlock_for_sync_local_effect": true,
+    "attempted_without_terminal_receipt_recovers_unknown": true,
+    "unknown_blocks_automatic_retry": true,
+    "duplicate_identical_receipt_idempotent": true,
+    "conflicting_operation_id_reuse_rejected": true,
+    "consent_ledger_separate_from_operation_journal": true,
+    "no_protected_payloads_in_operation_events": true,
+    "no_private_signing_keys_in_journal": true,
+    "no_async_network_under_blocking_effect_gate": true
+  },
+  "initial_bounds": {
+    "max_operations_per_session": 4096,
+    "max_events_per_session": 32768,
+    "capacity_full": "fail_closed"
+  },
+  "targets": {
+    "durable_pre_dispatch_barrier_p99_ms": 3,
+    "sync_effect_lock_hold_p99_ms": 20,
+    "protected_effect_without_durable_admission": 0,
+    "auto_retry_unknown": 0,
+    "protected_payload_bytes_in_journal": 0,
+    "claim": "proposed_not_measured"
+  },
+  "scenarios": [
+    {
+      "id": "DOJ-001",
+      "name": "normal-input-owner-commit",
+      "steps": [
+        "durable_admit",
+        "durable_attempt",
+        "injector_ok",
+        "durable_commit"
+      ],
+      "expected": "Committed"
+    },
+    {
+      "id": "DOJ-002",
+      "name": "permission-denied-before-admission",
+      "steps": [
+        "permission_check_denies"
+      ],
+      "expected": "Rejected",
+      "assert": [
+        "no_attempt",
+        "no_effect"
+      ]
+    },
+    {
+      "id": "DOJ-003",
+      "name": "no-op-backend-not-attempted",
+      "steps": [
+        "durable_admit",
+        "owner_detects_noop_before_invocation",
+        "durable_reject"
+      ],
+      "expected": "Rejected"
+    },
+    {
+      "id": "DOJ-004",
+      "name": "backend-error-after-invocation",
+      "steps": [
+        "durable_admit",
+        "durable_attempt",
+        "injector_error"
+      ],
+      "expected": "Unknown"
+    },
+    {
+      "id": "DOJ-005",
+      "name": "crash-after-admission-before-attempt",
+      "steps": [
+        "durable_admit",
+        "process_crash",
+        "restart_replay"
+      ],
+      "expected": "AdmittedNotAttempted"
+    },
+    {
+      "id": "DOJ-006",
+      "name": "crash-after-attempt-before-effect-call",
+      "steps": [
+        "durable_admit",
+        "durable_attempt",
+        "process_crash",
+        "restart_replay"
+      ],
+      "expected": "Unknown"
+    },
+    {
+      "id": "DOJ-007",
+      "name": "crash-after-effect-before-owner-receipt",
+      "steps": [
+        "durable_admit",
+        "durable_attempt",
+        "effect_owner_commits",
+        "process_crash",
+        "restart_replay"
+      ],
+      "expected": "Unknown"
+    },
+    {
+      "id": "DOJ-008",
+      "name": "crash-after-owner-receipt-before-fsync",
+      "steps": [
+        "durable_admit",
+        "durable_attempt",
+        "effect_owner_commits",
+        "write_result_without_sync",
+        "process_crash"
+      ],
+      "expected": "Unknown"
+    },
+    {
+      "id": "DOJ-009",
+      "name": "crash-after-terminal-receipt-fsync",
+      "steps": [
+        "durable_admit",
+        "durable_attempt",
+        "durable_commit",
+        "process_crash",
+        "restart_replay"
+      ],
+      "expected": "Committed"
+    },
+    {
+      "id": "DOJ-010",
+      "name": "disk-full-before-admission-fsync",
+      "steps": [
+        "append_admission",
+        "fsync_disk_full"
+      ],
+      "expected": "NoDispatch"
+    },
+    {
+      "id": "DOJ-011",
+      "name": "disk-full-before-attempt-fsync",
+      "steps": [
+        "durable_admit",
+        "append_attempt",
+        "fsync_disk_full"
+      ],
+      "expected": "NoDispatch"
+    },
+    {
+      "id": "DOJ-012",
+      "name": "disk-full-after-effect-before-result",
+      "steps": [
+        "durable_admit",
+        "durable_attempt",
+        "effect_invoked",
+        "result_append_fails"
+      ],
+      "expected": "UnknownHold"
+    },
+    {
+      "id": "DOJ-013",
+      "name": "torn-final-record",
+      "steps": [
+        "write_partial_final_record",
+        "restart_recovery"
+      ],
+      "expected": "TruncateOnlyFinalIncompleteRecord"
+    },
+    {
+      "id": "DOJ-014",
+      "name": "interior-journal-corruption",
+      "steps": [
+        "write_valid_records",
+        "tamper_middle_record",
+        "restart_recovery"
+      ],
+      "expected": "FailClosed"
+    },
+    {
+      "id": "DOJ-015",
+      "name": "duplicate-identical-operation-id",
+      "steps": [
+        "admit_operation",
+        "repeat_same_id_same_context_sequence"
+      ],
+      "expected": "IdempotentNoNewEvent"
+    },
+    {
+      "id": "DOJ-016",
+      "name": "conflicting-operation-id",
+      "steps": [
+        "admit_operation",
+        "reuse_id_other_lane_or_context"
+      ],
+      "expected": "OperationIdConflict"
+    },
+    {
+      "id": "DOJ-017",
+      "name": "nonmonotonic-operation-sequence",
+      "steps": [
+        "admit_sequence_10",
+        "admit_sequence_9"
+      ],
+      "expected": "Reject"
+    },
+    {
+      "id": "DOJ-018",
+      "name": "unknown-prevents-retry",
+      "steps": [
+        "attempt_operation",
+        "mark_unknown",
+        "retry_same_id"
+      ],
+      "expected": "Blocked"
+    },
+    {
+      "id": "DOJ-019",
+      "name": "unknown-reconcile-committed",
+      "steps": [
+        "unknown_operation",
+        "verify_owner_receipt",
+        "persist_reconciliation"
+      ],
+      "expected": "ReconciledCommitted"
+    },
+    {
+      "id": "DOJ-020",
+      "name": "unknown-reconcile-conflicting-receipt",
+      "steps": [
+        "unknown_operation",
+        "persist_receipt_a",
+        "present_receipt_b"
+      ],
+      "expected": "ReconciliationConflict"
+    },
+    {
+      "id": "DOJ-021",
+      "name": "revoke-before-local-effect-commit",
+      "steps": [
+        "revoke_gate_first",
+        "prepare_or_commit"
+      ],
+      "expected": "EffectNotInvoked"
+    },
+    {
+      "id": "DOJ-022",
+      "name": "local-effect-commit-before-revoke",
+      "steps": [
+        "effect_gate_commit_lock_first",
+        "commit_receipt",
+        "revoke_after"
+      ],
+      "expected": "CommitBeforeRevoke"
+    },
+    {
+      "id": "DOJ-023",
+      "name": "file-send-partial-stream-timeout",
+      "steps": [
+        "durable_attempt_chunk",
+        "partial_quic_write",
+        "timeout",
+        "restart"
+      ],
+      "expected": "UnknownChunkNoUnsafeRetry"
+    },
+    {
+      "id": "DOJ-024",
+      "name": "file-receiver-hash-verify-publication",
+      "steps": [
+        "stage_chunks",
+        "verify_digest",
+        "publish_no_clobber",
+        "send_verified_receipt"
+      ],
+      "expected": "ObservedOnlyAfterVerifiedReceipt"
+    },
+    {
+      "id": "DOJ-025",
+      "name": "file-published-before-sender-ack-lost",
+      "steps": [
+        "receiver_publish",
+        "verified_ack_lost",
+        "sender_restart"
+      ],
+      "expected": "SenderUnknownUntilReceiptReplay"
+    },
+    {
+      "id": "DOJ-026",
+      "name": "file-stage-crash-before-publication",
+      "steps": [
+        "stage_all_chunks",
+        "process_crash_before_publish",
+        "restart"
+      ],
+      "expected": "StagedNotPublished"
+    },
+    {
+      "id": "DOJ-027",
+      "name": "clipboard-content-not-in-journal",
+      "steps": [
+        "read_or_write_private_clipboard",
+        "persist_operation_events",
+        "inspect_records"
+      ],
+      "expected": "NoClipboardBytesOrHash"
+    },
+    {
+      "id": "DOJ-028",
+      "name": "clipboard-set-text-error",
+      "steps": [
+        "durable_attempt",
+        "set_text_invoked",
+        "error_return"
+      ],
+      "expected": "Unknown"
+    },
+    {
+      "id": "DOJ-029",
+      "name": "clipboard-read-not-equal-disclosure",
+      "steps": [
+        "get_text_success",
+        "durable_local_read_commit",
+        "outbound_send_unknown"
+      ],
+      "expected": "LocalReadCommittedPeerDisclosureUnknown"
+    },
+    {
+      "id": "DOJ-030",
+      "name": "frame-sent-not-equal-presented",
+      "steps": [
+        "local_frame_transport_write_ok",
+        "no_receiver_photon_receipt"
+      ],
+      "expected": "NoObservedStage"
+    },
+    {
+      "id": "DOJ-031",
+      "name": "rekey-epoch-binding",
+      "steps": [
+        "admit_under_epoch_a",
+        "rekey_to_epoch_b",
+        "replay_old_op_id"
+      ],
+      "expected": "OldEpochRejected"
+    },
+    {
+      "id": "DOJ-032",
+      "name": "cross-process-recovery",
+      "steps": [
+        "write_audit_wal",
+        "terminate_process",
+        "start_new_process",
+        "verify_chain_and_recover"
+      ],
+      "expected": "DeterministicRecovery"
+    },
+    {
+      "id": "DOJ-033",
+      "name": "signature-and-artifact-tampering",
+      "steps": [
+        "export_and_sign",
+        "modify_operation_event_or_root",
+        "verify_export"
+      ],
+      "expected": "SignatureOrDigestFailure"
+    },
+    {
+      "id": "DOJ-034",
+      "name": "capacity-exhaustion",
+      "steps": [
+        "fill_operation_capacity",
+        "attempt_next_admission"
+      ],
+      "expected": "CapacityFullNoDispatch"
+    },
+    {
+      "id": "DOJ-035",
+      "name": "consent-ledger-is-not-polluted",
+      "steps": [
+        "append_high_volume_operation_events",
+        "inspect_consent_journal"
+      ],
+      "expected": "ConsentBoundariesUnchanged"
+    }
+  ],
+  "measured_results": null
+}
