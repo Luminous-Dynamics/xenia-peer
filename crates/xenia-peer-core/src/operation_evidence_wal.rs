@@ -277,6 +277,19 @@ enum WalCommand {
 }
 
 impl WalCommand {
+    fn operation_id(self) -> [u8; 16] {
+        match self {
+            Self::Admit { operation_id, .. }
+            | Self::Attempted { operation_id, .. }
+            | Self::Committed { operation_id, .. }
+            | Self::Observed { operation_id, .. }
+            | Self::Rejected { operation_id, .. }
+            | Self::NotCommitted { operation_id, .. }
+            | Self::Unknown { operation_id, .. }
+            | Self::Reconcile { operation_id, .. } => operation_id,
+        }
+    }
+
     fn at_ticks(self) -> u64 {
         match self {
             Self::Admit { at_ticks, .. }
@@ -529,7 +542,6 @@ impl DurableOperationEvidenceJournal {
         at_ticks: u64,
         owner_receipt_digest: [u8; 32],
     ) -> Result<OperationSnapshot, DurableOperationJournalError> {
-        self.require_state(operation_id, &[OperationState::Attempted])?;
         self.require_state(
             operation_id,
             &[OperationState::Attempted],
@@ -555,6 +567,7 @@ impl DurableOperationEvidenceJournal {
         at_ticks: u64,
         observation_receipt_digest: [u8; 32],
     ) -> Result<OperationSnapshot, DurableOperationJournalError> {
+        self.ensure_healthy()?;
         let current = self.ledger.snapshot(operation_id)?;
         if !matches!(
             current.state,
@@ -665,6 +678,7 @@ impl DurableOperationEvidenceJournal {
         at_ticks: u64,
         receipt_digest: [u8; 32],
     ) -> Result<OperationSnapshot, DurableOperationJournalError> {
+        self.ensure_healthy()?;
         let current = self.ledger.snapshot(operation_id)?;
         let expected = match outcome {
             ReconciliationOutcome::NotCommitted => OperationState::ReconciledNotCommitted,
@@ -876,6 +890,13 @@ impl DurableOperationEvidenceJournal {
                 .map_err(|_| DurableOperationJournalError::CorruptRecord {
                     sequence: self.journal_sequence.saturating_add(1),
                 })?;
+            let canonical = bincode::serialize(&record)
+                .map_err(|error| DurableOperationJournalError::Codec(error.to_string()))?;
+            if canonical != encoded {
+                return Err(DurableOperationJournalError::CorruptRecord {
+                    sequence: self.journal_sequence.saturating_add(1),
+                });
+            }
             self.verify_record(&record)?;
             self.replay_command(record.body.command)?;
             self.last_record_hash = record.record_hash;
@@ -1292,6 +1313,52 @@ mod tests {
                 OperationEvidenceError::OperationIdConflict
             ))
         ));
+        drop(journal);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn invalid_transition_is_rejected_before_wal_append() {
+        let dir = temp_dir();
+        let path = dir.join("session.wal");
+        let session = [10; 32];
+        let mut journal = DurableOperationEvidenceJournal::open(&path, session, 109).unwrap();
+        journal
+            .admit(operation_id(10), 1, context(session), 1, [100; 32])
+            .unwrap();
+        let before = journal.journal_sequence();
+        assert!(matches!(
+            journal.mark_committed(operation_id(10), 2, [101; 32]),
+            Err(DurableOperationJournalError::Operation(
+                OperationEvidenceError::InvalidTransition { .. }
+            ))
+        ));
+        assert_eq!(journal.journal_sequence(), before);
+        assert!(!journal.is_poisoned());
+        drop(journal);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn regressing_tick_is_rejected_before_wal_append() {
+        let dir = temp_dir();
+        let path = dir.join("session.wal");
+        let session = [11; 32];
+        let mut journal = DurableOperationEvidenceJournal::open(&path, session, 110).unwrap();
+        journal
+            .admit(operation_id(11), 1, context(session), 10, [110; 32])
+            .unwrap();
+        let before = journal.journal_sequence();
+        assert!(matches!(
+            journal.mark_attempted(operation_id(11), 9, [111; 32]),
+            Err(DurableOperationJournalError::ClockRegression {
+                previous: 10,
+                observed: 9
+            })
+        ));
+        assert_eq!(journal.journal_sequence(), before);
+        assert!(!journal.is_poisoned());
+        drop(journal);
         cleanup(&path);
     }
 
