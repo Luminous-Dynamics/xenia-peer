@@ -20,11 +20,13 @@
 //! Input capture (mouse / keyboard → `RawInput` back to the
 //! daemon): pointer motion/buttons and a common-subset keymap are
 //! wired below via `egui::Context::input`. Captured [`InputEvent`]s
-//! go out over an unbounded channel to the network task, which seals
-//! and sends them concurrently with the frame-receive loop (see
-//! `gui_receive_loop` in `main.rs`). Coordinates are normalized
-//! against the last-rendered image rect, not the whole window, so
-//! pointer activity over the status bar / side panels is ignored.
+//! go out over a bounded channel to the network task. Input is admitted
+//! only while the pointer targets the rendered remote image and local
+//! egui controls are not requesting keyboard input. Forwarded key and
+//! pointer-button presses are tracked so a focus/target transition emits
+//! matching releases instead of stranding a pressed state remotely.
+//! Coordinates are normalized against the last-rendered image rect,
+//! not the whole window.
 
 use std::sync::{Arc, Mutex};
 
@@ -313,6 +315,120 @@ pub struct ViewerConfig {
     pub peer_addr: String,
 }
 
+/// Tracks only input state that has actually crossed the client boundary.
+///
+/// This is deliberately separate from egui's transient per-frame event list:
+/// a key/button release must still be emitted if focus or pointer location
+/// changes between the original press and the physical release.
+#[derive(Default)]
+struct RemoteInputState {
+    last_pointer: Option<(f32, f32)>,
+    pressed_pointer_buttons: std::collections::HashSet<u8>,
+    // Store key-down modifiers so the matching release describes the same
+    // key chord even if local focus changes before key-up arrives.
+    pressed_keys: std::collections::HashMap<u32, u8>,
+}
+
+impl RemoteInputState {
+    fn pointer_move(&mut self, position: Option<(f32, f32)>) -> Option<InputEvent> {
+        let (x, y) = position?;
+        self.last_pointer = Some((x, y));
+        Some(InputEvent::PointerMove { x, y })
+    }
+
+    fn pointer_button(
+        &mut self,
+        button: u8,
+        pressed: bool,
+        position: Option<(f32, f32)>,
+    ) -> Option<InputEvent> {
+        if pressed {
+            let (x, y) = position?;
+            self.last_pointer = Some((x, y));
+            if !self.pressed_pointer_buttons.insert(button) {
+                return None;
+            }
+            Some(InputEvent::PointerButton {
+                x,
+                y,
+                button,
+                pressed: true,
+            })
+        } else if self.pressed_pointer_buttons.remove(&button) {
+            let (x, y) = position.or(self.last_pointer)?;
+            self.last_pointer = Some((x, y));
+            Some(InputEvent::PointerButton {
+                x,
+                y,
+                button,
+                pressed: false,
+            })
+        } else {
+            // A release without a forwarded press is never injected.
+            None
+        }
+    }
+
+    fn release_pointer_buttons(&mut self) -> Vec<InputEvent> {
+        let Some((x, y)) = self.last_pointer else {
+            self.pressed_pointer_buttons.clear();
+            return Vec::new();
+        };
+        let mut buttons = self.pressed_pointer_buttons.drain().collect::<Vec<_>>();
+        buttons.sort_unstable();
+        buttons
+            .into_iter()
+            .map(|button| InputEvent::PointerButton {
+                x,
+                y,
+                button,
+                pressed: false,
+            })
+            .collect()
+    }
+
+    fn key_event(
+        &mut self,
+        code: u32,
+        pressed: bool,
+        modifiers: u8,
+        allow_new_press: bool,
+    ) -> Option<InputEvent> {
+        if pressed {
+            if !allow_new_press || self.pressed_keys.contains_key(&code) {
+                return None;
+            }
+            self.pressed_keys.insert(code, modifiers);
+            Some(InputEvent::Key {
+                code,
+                pressed: true,
+                modifiers,
+            })
+        } else {
+            // A matching key-up is allowed even after focus is lost. Its
+            // modifiers come from the original admitted key-down.
+            let modifiers = self.pressed_keys.remove(&code)?;
+            Some(InputEvent::Key {
+                code,
+                pressed: false,
+                modifiers,
+            })
+        }
+    }
+
+    fn release_keys(&mut self) -> Vec<InputEvent> {
+        let mut keys = self.pressed_keys.drain().collect::<Vec<_>>();
+        keys.sort_unstable_by_key(|(code, _)| *code);
+        keys.into_iter()
+            .map(|(code, modifiers)| InputEvent::Key {
+                code,
+                pressed: false,
+                modifiers,
+            })
+            .collect()
+    }
+}
+
 /// eframe::App implementing the viewer window.
 pub struct ViewerApp {
     slot: Arc<FrameSlot>,
@@ -331,6 +447,7 @@ pub struct ViewerApp {
     // Input capture (mouse / keyboard -> daemon). `None` means input
     // is disabled client-side (no channel was wired up).
     input_tx: Option<tokio::sync::mpsc::Sender<InputEvent>>,
+    remote_input: RemoteInputState,
     // On-screen rect of the last-rendered frame image, used to
     // normalize pointer coordinates and to ignore pointer activity
     // over the status bar / side panels.
@@ -363,6 +480,7 @@ impl ViewerApp {
             last_audio: None,
             recent_frame_instants: std::collections::VecDeque::with_capacity(64),
             input_tx,
+            remote_input: RemoteInputState::default(),
             image_rect: None,
             last_pointer_pos: None,
         }
@@ -447,37 +565,59 @@ impl ViewerApp {
             (pos, buttons, keys)
         });
 
-        if let Some(pos) = pointer_pos
-            && self.last_pointer_pos != Some(pos)
-        {
-            self.last_pointer_pos = Some(pos);
-            if let Some((x, y)) = self.normalize_in_image(pos) {
-                self.send_lossy_input(InputEvent::PointerMove { x, y });
+        let pointer_in_image = pointer_pos.and_then(|pos| self.normalize_in_image(pos));
+
+        if let Some(pos) = pointer_pos {
+            if self.last_pointer_pos != Some(pos) {
+                self.last_pointer_pos = Some(pos);
+                if let Some(event) = self.remote_input.pointer_move(pointer_in_image) {
+                    self.send_lossy_input(event);
+                }
             }
+        } else {
+            self.last_pointer_pos = None;
         }
 
         for (button, pressed) in button_events {
-            let Some(pos) = pointer_pos else { continue };
-            let Some((x, y)) = self.normalize_in_image(pos) else {
-                continue;
-            };
-            self.send_stateful_input(InputEvent::PointerButton {
-                x,
-                y,
-                button: pointer_button_id(button),
+            if let Some(event) = self.remote_input.pointer_button(
+                pointer_button_id(button),
                 pressed,
-            });
+                pointer_in_image,
+            ) {
+                self.send_stateful_input(event);
+            }
+        }
+
+        // A remote drag must not remain held after the pointer leaves the
+        // image, enters local chrome, or leaves the viewer window.
+        if pointer_in_image.is_none() {
+            for event in self.remote_input.release_pointer_buttons() {
+                self.send_stateful_input(event);
+            }
+        }
+
+        // Hovering the remote image is the explicit pointer target for
+        // keyboard forwarding. Local egui text editing, menus, and other
+        // keyboard-consuming controls always take precedence.
+        let allow_remote_keyboard = pointer_in_image.is_some() && !ctx.wants_keyboard_input();
+        if !allow_remote_keyboard {
+            for event in self.remote_input.release_keys() {
+                self.send_stateful_input(event);
+            }
         }
 
         for (key, pressed, modifiers) in key_events {
             let Some(code) = egui_key_to_evdev(key) else {
                 continue;
             };
-            self.send_stateful_input(InputEvent::Key {
+            if let Some(event) = self.remote_input.key_event(
                 code,
                 pressed,
-                modifiers: modifiers_bitmask(&modifiers),
-            });
+                modifiers_bitmask(&modifiers),
+                allow_remote_keyboard,
+            ) {
+                self.send_stateful_input(event);
+            }
         }
     }
 
@@ -735,6 +875,112 @@ mod tests {
         assert_eq!(pointer_button_id(egui::PointerButton::Primary), 0);
         assert_eq!(pointer_button_id(egui::PointerButton::Middle), 1);
         assert_eq!(pointer_button_id(egui::PointerButton::Secondary), 2);
+    }
+
+    #[test]
+    fn remote_keys_are_gated_and_only_matching_releases_are_forwarded() {
+        let mut state = RemoteInputState::default();
+
+        assert!(state.key_event(30, true, 0b0011, false).is_none());
+        assert!(state.key_event(30, false, 0, false).is_none());
+
+        assert!(matches!(
+            state.key_event(30, true, 0b0011, true),
+            Some(InputEvent::Key {
+                code: 30,
+                pressed: true,
+                modifiers: 0b0011,
+            })
+        ));
+        assert!(state.key_event(30, true, 0b0011, true).is_none());
+        assert!(matches!(
+            state.key_event(30, false, 0, false),
+            Some(InputEvent::Key {
+                code: 30,
+                pressed: false,
+                modifiers: 0b0011,
+            })
+        ));
+        assert!(state.key_event(30, false, 0, false).is_none());
+    }
+
+    #[test]
+    fn remote_key_focus_loss_releases_each_forwarded_key_once() {
+        let mut state = RemoteInputState::default();
+        assert!(state.key_event(48, true, 0b0001, true).is_some());
+        assert!(state.key_event(30, true, 0b0010, true).is_some());
+
+        let releases = state.release_keys();
+        assert_eq!(releases.len(), 2);
+        assert!(matches!(
+            releases[0],
+            InputEvent::Key {
+                code: 30,
+                pressed: false,
+                modifiers: 0b0010,
+            }
+        ));
+        assert!(matches!(
+            releases[1],
+            InputEvent::Key {
+                code: 48,
+                pressed: false,
+                modifiers: 0b0001,
+            }
+        ));
+        assert!(state.release_keys().is_empty());
+    }
+
+    #[test]
+    fn pointer_release_after_leaving_image_uses_last_valid_coordinates() {
+        let mut state = RemoteInputState::default();
+        assert!(state.pointer_move(Some((0.2, 0.3))).is_some());
+        assert!(matches!(
+            state.pointer_button(0, true, Some((0.4, 0.6))),
+            Some(InputEvent::PointerButton {
+                x,
+                y,
+                button: 0,
+                pressed: true,
+            }) if (x - 0.4).abs() < f32::EPSILON && (y - 0.6).abs() < f32::EPSILON
+        ));
+        assert!(matches!(
+            state.pointer_button(0, false, None),
+            Some(InputEvent::PointerButton {
+                x,
+                y,
+                button: 0,
+                pressed: false,
+            }) if (x - 0.4).abs() < f32::EPSILON && (y - 0.6).abs() < f32::EPSILON
+        ));
+        assert!(state.pointer_button(0, false, None).is_none());
+    }
+
+    #[test]
+    fn leaving_image_releases_all_pointer_buttons_once() {
+        let mut state = RemoteInputState::default();
+        assert!(state.pointer_button(2, true, Some((0.7, 0.8))).is_some());
+        assert!(state.pointer_button(0, true, Some((0.7, 0.8))).is_some());
+
+        let releases = state.release_pointer_buttons();
+        assert_eq!(releases.len(), 2);
+        assert!(matches!(
+            releases[0],
+            InputEvent::PointerButton {
+                button: 0,
+                pressed: false,
+                ..
+            }
+        ));
+        assert!(matches!(
+            releases[1],
+            InputEvent::PointerButton {
+                button: 2,
+                pressed: false,
+                ..
+            }
+        ));
+        assert!(state.release_pointer_buttons().is_empty());
     }
 
     #[test]
