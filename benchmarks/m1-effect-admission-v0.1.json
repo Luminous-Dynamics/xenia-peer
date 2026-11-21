@@ -1,0 +1,272 @@
+{
+  "schema": "xenia-m1-permission-vs-effect-workloads/v1",
+  "status": "synthetic_m1_semantics_and_concurrency_fixtures",
+  "purpose": "Ensure permission admission is not represented as a successful effect and locally serialize synchronous input effect with revoke.",
+  "invariants": {
+    "old_success_shaped_event_variants_retained_for_compatibility": true,
+    "new_permission_gates_emit_admission_events": true,
+    "operation_events_excluded_from_human_consent_ledger": true,
+    "input_owner_call_occurs_under_shared_m1_runtime_lock": true,
+    "revoke_uses_same_m1_runtime_lock": true,
+    "injector_backend_error_is_unknown": true,
+    "unavailable_noop_backend_is_not_attempted": true,
+    "no_target_application_or_photon_claim": true,
+    "async_file_or_network_operations_not_wrapped_in_m1_lock": true,
+    "clipboard_read_permission_checked_before_os_read": true,
+    "clipboard_write_permission_checked_before_set_text": true,
+    "clipboard_api_calls_serialized_with_local_revoke": true,
+    "clipboard_payload_never_copied_into_m1_operation_audit": true,
+    "clipboard_read_completion_not_equal_peer_disclosure": true,
+    "clipboard_write_applied_not_equal_consumer_application": true
+  },
+  "scenarios": [
+    {
+      "id": "M1FX-001",
+      "name": "permission-admitted-without-platform-call",
+      "steps": [
+        "grant_inject_permission",
+        "request_input"
+      ],
+      "expected": "InputPermissionAdmittedOnly",
+      "order": 1
+    },
+    {
+      "id": "M1FX-002",
+      "name": "platform-injector-returns-ok",
+      "steps": [
+        "permission_admitted",
+        "injector_process_events_ok",
+        "append_outcome"
+      ],
+      "expected": "InputPlatformAccepted",
+      "order": 2
+    },
+    {
+      "id": "M1FX-003",
+      "name": "backend-error-after-possible-partial-batch",
+      "steps": [
+        "permission_admitted",
+        "injector_process_events_backend_error"
+      ],
+      "expected": "InputOutcomeUnknown",
+      "order": 3
+    },
+    {
+      "id": "M1FX-004",
+      "name": "unavailable-backend-or-noop-fallback",
+      "steps": [
+        "permission_admitted",
+        "backend_name_noop_or_unavailable"
+      ],
+      "expected": "InputNotAttempted",
+      "order": 4
+    },
+    {
+      "id": "M1FX-005",
+      "name": "permission-denied-does-not-invoke-injector",
+      "steps": [
+        "no_input_permission",
+        "call_with_input_effect"
+      ],
+      "expected": "PermissionDenied",
+      "assert": [
+        "effect_closure_not_called"
+      ],
+      "order": 5
+    },
+    {
+      "id": "M1FX-006",
+      "name": "revoke-waits-for-input-effect",
+      "steps": [
+        "input_locks_runtime",
+        "input_callback_enters",
+        "revoke_waits_for_runtime",
+        "input_outcome_appended",
+        "input_unlocks",
+        "revoke_linearizes"
+      ],
+      "expected": "InputOutcomeBeforeRevoke",
+      "order": 6
+    },
+    {
+      "id": "M1FX-007",
+      "name": "revoke-before-input-admission",
+      "steps": [
+        "revoke_locks_runtime",
+        "revoke_completes",
+        "input_attempts_lock",
+        "permission_check"
+      ],
+      "expected": "PermissionDenied",
+      "assert": [
+        "effect_closure_not_called"
+      ],
+      "order": 7
+    },
+    {
+      "id": "M1FX-008",
+      "name": "operation-events-not-consent-boundaries",
+      "steps": [
+        "append_all_new_admission_and_outcome_events",
+        "map_to_consent_journal"
+      ],
+      "expected": "SkipNotConsentBoundary",
+      "order": 8
+    },
+    {
+      "id": "M1FX-009",
+      "name": "legacy-variants-remain-readable",
+      "steps": [
+        "construct_historical_event_variant",
+        "map_to_consent_journal"
+      ],
+      "expected": "HistoricalVariantStillRecognized",
+      "order": 9
+    },
+    {
+      "id": "M1FX-010",
+      "name": "host-clipboard-read-permission-before-get-text",
+      "steps": [
+        "request_read_permission",
+        "admit_or_deny",
+        "only_if_admitted_call_get_text",
+        "record_read_outcome"
+      ],
+      "expected": "ReadOccursOnlyAfterAdmission",
+      "order": 10
+    },
+    {
+      "id": "M1FX-011",
+      "name": "host-clipboard-write-outcome",
+      "steps": [
+        "request_write_permission",
+        "admit_or_deny",
+        "only_if_admitted_call_set_text",
+        "record_applied_unknown_or_not_attempted"
+      ],
+      "expected": "TypedClipboardWriteOutcome",
+      "order": 11
+    },
+    {
+      "id": "M1FX-012",
+      "name": "clipboard-payload-privacy",
+      "steps": [
+        "read_or_write_private_clipboard_text",
+        "append_operation_event",
+        "inspect_event_fields_and_logs"
+      ],
+      "expected": "NoClipboardContentInAudit",
+      "order": 12
+    },
+    {
+      "id": "M1FX-013",
+      "name": "clipboard-read-os-adapter-unavailable",
+      "steps": [
+        "permission_admitted",
+        "clipboard_adapter_creation_fails",
+        "record_not_attempted"
+      ],
+      "expected": "HostClipboardReadNotAttempted",
+      "order": 13
+    },
+    {
+      "id": "M1FX-014",
+      "name": "clipboard-read-content-unavailable",
+      "steps": [
+        "permission_admitted",
+        "get_text_returns_content_not_available",
+        "record_completed_none"
+      ],
+      "expected": "HostClipboardReadCompleted",
+      "order": 14
+    },
+    {
+      "id": "M1FX-015",
+      "name": "clipboard-read-error-after-invocation",
+      "steps": [
+        "permission_admitted",
+        "get_text_returns_other_error",
+        "record_unknown"
+      ],
+      "expected": "HostClipboardReadOutcomeUnknown",
+      "order": 15
+    },
+    {
+      "id": "M1FX-016",
+      "name": "clipboard-write-oversize-preflight",
+      "steps": [
+        "permission_admitted",
+        "size_validation_rejects_before_set_text"
+      ],
+      "expected": "HostClipboardWriteNotAttempted",
+      "order": 16
+    },
+    {
+      "id": "M1FX-017",
+      "name": "clipboard-write-set-text-error",
+      "steps": [
+        "permission_admitted",
+        "set_text_returns_error"
+      ],
+      "expected": "HostClipboardWriteOutcomeUnknown",
+      "order": 17
+    },
+    {
+      "id": "M1FX-018",
+      "name": "revoke-waits-for-clipboard-write",
+      "steps": [
+        "clipboard_effect_locks_runtime",
+        "set_text_in_progress",
+        "revoke_waits",
+        "record_result",
+        "unlock",
+        "revoke_linearizes"
+      ],
+      "expected": "ClipboardOutcomeBeforeRevoke",
+      "order": 18
+    },
+    {
+      "id": "M1FX-019",
+      "name": "revoke-before-clipboard-read",
+      "steps": [
+        "revoke_locks_runtime",
+        "revoke_completes",
+        "clipboard_read_attempts_lock"
+      ],
+      "expected": "PermissionDeniedBeforeGetText",
+      "order": 19
+    },
+    {
+      "id": "M1FX-020",
+      "name": "read-complete-does-not-mean-peer-disclosure",
+      "steps": [
+        "get_text_success",
+        "record_host_read_completed",
+        "outbound_frame_send_fails"
+      ],
+      "expected": "OnlyLocalReadClaimed",
+      "order": 20
+    },
+    {
+      "id": "M1FX-021",
+      "name": "write-applied-does-not-mean-consumer-read",
+      "steps": [
+        "set_text_success",
+        "record_host_write_applied",
+        "no_consumer_ack"
+      ],
+      "expected": "OnlyLocalApiAcceptedClaimed",
+      "order": 21
+    }
+  ],
+  "unimplemented_routes": [
+    "clipboard_disclosure",
+    "clipboard_apply",
+    "file_chunk_send",
+    "file_receive_staging_and_publication",
+    "frame_send_and_presentation",
+    "telemetry_send",
+    "audio_send"
+  ],
+  "performance_results": null
+}
