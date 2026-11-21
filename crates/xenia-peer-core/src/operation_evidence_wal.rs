@@ -390,6 +390,7 @@ impl DurableOperationEvidenceJournal {
             use std::os::unix::fs::OpenOptionsExt;
             options.mode(0o600);
         }
+        let path_existed = path.exists();
         let file = match options.open(&path) {
             Ok(file) => file,
             Err(error) => {
@@ -420,6 +421,9 @@ impl DurableOperationEvidenceJournal {
             last_event_tick: None,
             poisoned: false,
         };
+        if !path_existed {
+            sync_parent_directory(&journal.path)?;
+        }
         journal.replay_existing()?;
         journal.recover_interrupted_attempts()?;
         Ok(journal)
@@ -499,7 +503,11 @@ impl DurableOperationEvidenceJournal {
         at_ticks: u64,
         evidence_digest: [u8; 32],
     ) -> Result<OperationSnapshot, DurableOperationJournalError> {
-        self.require_state(operation_id, &[OperationState::Admitted])?;
+        self.require_state(
+            operation_id,
+            &[OperationState::Admitted],
+            crate::operation_evidence::OperationEventKind::EffectAttempted,
+        )?;
         self.append_command(WalCommand::Attempted {
             operation_id: operation_id.0,
             at_ticks,
@@ -522,6 +530,11 @@ impl DurableOperationEvidenceJournal {
         owner_receipt_digest: [u8; 32],
     ) -> Result<OperationSnapshot, DurableOperationJournalError> {
         self.require_state(operation_id, &[OperationState::Attempted])?;
+        self.require_state(
+            operation_id,
+            &[OperationState::Attempted],
+            crate::operation_evidence::OperationEventKind::EffectCommitted,
+        )?;
         self.append_command(WalCommand::Committed {
             operation_id: operation_id.0,
             at_ticks,
@@ -574,7 +587,11 @@ impl DurableOperationEvidenceJournal {
         at_ticks: u64,
         rejection_evidence_digest: [u8; 32],
     ) -> Result<OperationSnapshot, DurableOperationJournalError> {
-        self.require_state(operation_id, &[OperationState::Admitted])?;
+        self.require_state(
+            operation_id,
+            &[OperationState::Admitted],
+            crate::operation_evidence::OperationEventKind::Rejected,
+        )?;
         self.append_command(WalCommand::Rejected {
             operation_id: operation_id.0,
             at_ticks,
@@ -595,7 +612,11 @@ impl DurableOperationEvidenceJournal {
         at_ticks: u64,
         evidence_digest: [u8; 32],
     ) -> Result<OperationSnapshot, DurableOperationJournalError> {
-        self.require_state(operation_id, &[OperationState::Attempted])?;
+        self.require_state(
+            operation_id,
+            &[OperationState::Attempted],
+            crate::operation_evidence::OperationEventKind::EffectNotCommitted,
+        )?;
         self.append_command(WalCommand::NotCommitted {
             operation_id: operation_id.0,
             at_ticks,
@@ -617,7 +638,11 @@ impl DurableOperationEvidenceJournal {
         at_ticks: u64,
         evidence_digest: [u8; 32],
     ) -> Result<OperationSnapshot, DurableOperationJournalError> {
-        self.require_state(operation_id, &[OperationState::Attempted])?;
+        self.require_state(
+            operation_id,
+            &[OperationState::Attempted],
+            crate::operation_evidence::OperationEventKind::Unknown,
+        )?;
         self.append_command(WalCommand::Unknown {
             operation_id: operation_id.0,
             at_ticks,
@@ -711,6 +736,7 @@ impl DurableOperationEvidenceJournal {
         &self,
         operation_id: OperationId,
         allowed: &[OperationState],
+        event: crate::operation_evidence::OperationEventKind,
     ) -> Result<OperationSnapshot, DurableOperationJournalError> {
         self.ensure_healthy()?;
         let snapshot = self.ledger.snapshot(operation_id)?;
@@ -720,7 +746,7 @@ impl DurableOperationEvidenceJournal {
             Err(DurableOperationJournalError::Operation(
                 OperationEvidenceError::InvalidTransition {
                     from: snapshot.state,
-                    event: crate::operation_evidence::OperationEventKind::EffectAttempted,
+                    event,
                 },
             ))
         }
@@ -811,6 +837,9 @@ impl DurableOperationEvidenceJournal {
     }
 
     fn replay_existing(&mut self) -> Result<(), DurableOperationJournalError> {
+        if self.file.metadata()?.len() > MAX_OPERATION_WAL_BYTES {
+            return Err(DurableOperationJournalError::CapacityFull);
+        }
         let read_file = File::open(&self.path)?;
         let mut reader = BufReader::new(read_file);
         let mut valid_bytes = 0_u64;
@@ -1039,6 +1068,19 @@ impl Drop for DurableOperationEvidenceJournal {
     }
 }
 
+#[cfg(unix)]
+fn sync_parent_directory(path: &Path) -> io::Result<()> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    File::open(parent)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_parent_directory(_path: &Path) -> io::Result<()> {
+    // Directory fsync is not consistently exposed by std on every platform.
+    // The platform qualification document must record this durability limit.
+    Ok(())
+}
+
 fn lock_path_for(path: &Path) -> PathBuf {
     let file_name = path
         .file_name()
@@ -1063,7 +1105,11 @@ fn create_writer_lock(path: &Path) -> Result<File, DurableOperationJournalError>
         }
     })?;
     let process_id = std::process::id().to_le_bytes();
-    if let Err(error) = file.write_all(&process_id).and_then(|()| file.sync_all()) {
+    if let Err(error) = file
+        .write_all(&process_id)
+        .and_then(|()| file.sync_all())
+        .and_then(|()| sync_parent_directory(path))
+    {
         drop(file);
         let _ = fs::remove_file(path);
         return Err(DurableOperationJournalError::Io(error));
