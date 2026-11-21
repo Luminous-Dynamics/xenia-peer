@@ -35,7 +35,9 @@ use xenia_peer_core::{
 };
 
 use crate::m1_ledger::consent_record_for_m1_event;
-use xenia_peer_core::M1InputEffectOutcome;
+use xenia_peer_core::{
+    M1ClipboardReadOutcome, M1ClipboardWriteOutcome, M1InputEffectOutcome,
+};
 
 #[derive(Debug)]
 pub(crate) enum M1RuntimeError {
