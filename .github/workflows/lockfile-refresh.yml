@@ -1,0 +1,61 @@
+name: temporary Cargo lockfile regeneration
+
+on:
+  push:
+    branches:
+      - chore/refresh-security-advisory-locks-v0.1
+  pull_request:
+    branches:
+      - main
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: cargo-lock-refresh-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  regenerate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref || github.ref_name }}
+      - uses: DeterminateSystems/nix-installer-action@main
+      - name: Resolve only the reviewed dependency updates
+        run: |
+          nix develop .#ci --command bash -c '
+            set -euo pipefail
+            cargo update --package rustix@1.1.4 --precise 1.1.6
+            cargo update --package arboard --precise 3.7.0
+            cargo update --package clipboard-win --precise 5.4.3
+            cargo metadata --locked --format-version 1 --no-deps >/dev/null
+
+            if grep -A1 "^name = \"rustix\"$" Cargo.lock | grep -q "^version = \"1.1.4\"$"; then
+              echo "RUSTSEC-2026-0486 vulnerable rustix 1.1.4 remains in Cargo.lock"
+              exit 1
+            fi
+            grep -A1 "^name = \"rustix\"$" Cargo.lock
+            grep -A1 "^name = \"clipboard-win\"$" Cargo.lock
+            grep -A1 "^name = \"arboard\"$" Cargo.lock
+          '
+      - name: Commit Cargo-generated lockfile and remove this temporary workflow
+        env:
+          TARGET_BRANCH: ${{ github.head_ref || github.ref_name }}
+        run: |
+          set -euo pipefail
+          git diff --check
+          if git diff --quiet -- Cargo.lock; then
+            echo "Cargo produced no lockfile delta; refusing to claim regeneration."
+            rm .github/workflows/lockfile-refresh.yml
+            git add .github/workflows/lockfile-refresh.yml
+            git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" commit -m "ci: remove temporary lockfile regeneration workflow"
+            git push origin "HEAD:${TARGET_BRANCH}"
+            exit 1
+          fi
+          rm .github/workflows/lockfile-refresh.yml
+          git add Cargo.lock .github/workflows/lockfile-refresh.yml
+          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" commit -m "chore(deps): regenerate Cargo lockfile with fixed crates"
+          git push origin "HEAD:${TARGET_BRANCH}"

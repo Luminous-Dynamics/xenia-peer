@@ -54,7 +54,7 @@ xenia-handshake = { path = "../../crates/xenia-handshake" }
 # so it is opt-in rather than a default compile-time coupling.
 rust-embed = { version = "8.11.0", features = ["axum", "mime-guess"], optional = true }
 mime_guess = { version = "2.0.5", optional = true }
-arboard = { version = "3.6.1", default-features = false, features = ["wayland-data-control"] }
+arboard = { version = "3.7.0", default-features = false, features = ["wayland-data-control"] }
 xenia-capture-scrcpy = { path = "../../crates/xenia-capture-scrcpy", optional = true }
 
 [features]
