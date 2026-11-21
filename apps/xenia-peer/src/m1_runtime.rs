@@ -30,14 +30,11 @@ use xenia_ledger::{
     SignatureEnvelope, SignatureSuite, Verifier, VerifyError,
 };
 use xenia_peer_core::{
-    M1AuditEvent, M1Permission, M1PermissionSet, M1SessionError, M1SessionMachine,
-    M1SessionState,
+    M1AuditEvent, M1ClipboardReadOutcome, M1ClipboardWriteOutcome, M1InputEffectOutcome,
+    M1Permission, M1PermissionSet, M1SessionError, M1SessionMachine, M1SessionState,
 };
 
 use crate::m1_ledger::consent_record_for_m1_event;
-use xenia_peer_core::{
-    M1ClipboardReadOutcome, M1ClipboardWriteOutcome, M1InputEffectOutcome,
-};
 
 #[derive(Debug)]
 pub(crate) enum M1RuntimeError {
