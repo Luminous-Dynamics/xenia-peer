@@ -1,0 +1,181 @@
+{
+  "schema": "xenia-operation-evidence-wal/v1",
+  "status": "synthetic_fault_corpus_for_durable_wal",
+  "issue": 545,
+  "base_pr": 531,
+  "bounds": {
+    "max_record_bytes": 1024,
+    "max_journal_bytes": 33554432,
+    "max_operations": 4096,
+    "max_events": 32768
+  },
+  "durability": {
+    "append": "write_all_then_sync_data",
+    "unix_new_file": "sync_parent_directory",
+    "non_unix": "directory_fsync_not_proven"
+  },
+  "invariants": {
+    "admission_durable_before_attempt": true,
+    "attempt_durable_before_effect_dispatch": true,
+    "attempted_without_terminal_after_restart_becomes_unknown": true,
+    "unknown_blocks_retry": true,
+    "complete_record_hash_chain_verified": true,
+    "only_incomplete_final_frame_may_be_truncated": true,
+    "complete_corruption_fails_closed": true,
+    "conflicting_operation_id_context_rejected": true,
+    "identical_admission_idempotent": true,
+    "single_writer_lock": true,
+    "consent_ledger_not_modified": true,
+    "no_raw_payloads": true,
+    "reserve_event_slots_for_nonterminal_states": true,
+    "reserve_worst_case_bytes_for_terminal_and_reconciliation_records": true
+  },
+  "scenarios": [
+    {
+      "id": "WAL-001",
+      "name": "admit-attempt-commit-restart",
+      "expected": "Committed"
+    },
+    {
+      "id": "WAL-002",
+      "name": "process-crash-after-attempt",
+      "expected": "UnknownNoRetry"
+    },
+    {
+      "id": "WAL-003",
+      "name": "process-crash-after-effect-before-terminal-record",
+      "expected": "UnknownNoRetry"
+    },
+    {
+      "id": "WAL-004",
+      "name": "torn-final-length-prefix",
+      "expected": "TruncateToLastValidBoundary"
+    },
+    {
+      "id": "WAL-005",
+      "name": "torn-final-payload",
+      "expected": "TruncateToLastValidBoundary"
+    },
+    {
+      "id": "WAL-006",
+      "name": "complete-final-record-corruption",
+      "expected": "FailClosed"
+    },
+    {
+      "id": "WAL-007",
+      "name": "interior-hash-link-corruption",
+      "expected": "FailClosed"
+    },
+    {
+      "id": "WAL-008",
+      "name": "unsupported-schema-version",
+      "expected": "FailClosed"
+    },
+    {
+      "id": "WAL-009",
+      "name": "wrong-session-fingerprint",
+      "expected": "FailClosed"
+    },
+    {
+      "id": "WAL-010",
+      "name": "wrong-clock-domain",
+      "expected": "FailClosed"
+    },
+    {
+      "id": "WAL-011",
+      "name": "operation-id-conflicting-context",
+      "expected": "OperationIdConflict"
+    },
+    {
+      "id": "WAL-012",
+      "name": "identical-admission-replay",
+      "expected": "IdempotentNoNewRecord"
+    },
+    {
+      "id": "WAL-013",
+      "name": "out-of-order-operation-sequence",
+      "expected": "RejectBeforeAppend"
+    },
+    {
+      "id": "WAL-014",
+      "name": "clock-regression",
+      "expected": "RejectBeforeAppend"
+    },
+    {
+      "id": "WAL-015",
+      "name": "invalid-state-transition",
+      "expected": "RejectBeforeAppend"
+    },
+    {
+      "id": "WAL-016",
+      "name": "two-concurrent-writers",
+      "expected": "SecondWriterRejected"
+    },
+    {
+      "id": "WAL-017",
+      "name": "stale-writer-lock-after-crash",
+      "expected": "ManualRecoveryRequired"
+    },
+    {
+      "id": "WAL-018",
+      "name": "disk-full-before-admission-sync",
+      "expected": "NoEffectDispatch"
+    },
+    {
+      "id": "WAL-019",
+      "name": "disk-full-before-attempt-sync",
+      "expected": "NoEffectDispatch"
+    },
+    {
+      "id": "WAL-020",
+      "name": "disk-full-after-effect-before-commit-sync",
+      "expected": "JournalPoisonedThenUnknownAfterRestart"
+    },
+    {
+      "id": "WAL-021",
+      "name": "duplicate-commit-owner-receipt",
+      "expected": "IdempotentOnlyForExactSameReceipt"
+    },
+    {
+      "id": "WAL-022",
+      "name": "unknown-reconciliation-after-restart",
+      "expected": "Reconciled"
+    },
+    {
+      "id": "WAL-023",
+      "name": "conflicting-reconciliation-receipt",
+      "expected": "RejectConflict"
+    },
+    {
+      "id": "WAL-024",
+      "name": "operation-capacity-full",
+      "expected": "NoFurtherAdmission"
+    },
+    {
+      "id": "WAL-025",
+      "name": "event-capacity-full",
+      "expected": "NoFurtherStageAppend"
+    },
+    {
+      "id": "WAL-026",
+      "name": "journal-byte-capacity-full",
+      "expected": "FailClosed"
+    },
+    {
+      "id": "WAL-027",
+      "name": "non-unix-directory-durability",
+      "expected": "NoProductionClaimWithoutPlatformQualification"
+    },
+    {
+      "id": "WAL-028",
+      "name": "event-capacity-near-limit-with-attempted-operation",
+      "expected": "AdmissionStopsBeforeRecoverySlotExhaustion"
+    },
+    {
+      "id": "WAL-029",
+      "name": "byte-capacity-near-limit-with-attempted-operation",
+      "expected": "AdmissionStopsBeforeTerminalUnknownRecordCannotFit"
+    }
+  ],
+  "measured_results": null
+}
