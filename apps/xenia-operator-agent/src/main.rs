@@ -737,8 +737,11 @@ async fn sign_challenge(
 /// Whether `scope` -- the daemon-generated, digest-bound scope text from
 /// `m1_consent_scope` in `apps/xenia-peer`, never operator/console-authored
 /// free text -- describes a grant broader than pure screen viewing: input
-/// injection, clipboard access in either direction, or file transfer in
-/// either direction. Parses fixed-format substrings rather than sniffing
+/// injection, clipboard access in either direction, file transfer in
+/// either direction, host-device audio capture, or system-level host-identity
+/// telemetry. Basic performance-only telemetry and synthetic audio do not
+/// cross this extra-confirmation threshold. Parses fixed-format substrings
+/// rather than sniffing
 /// prose: `scope` is only ever daemon-generated and bound into the signed
 /// transcript via `scope_digest`, so a compromised console cannot alter
 /// what this classifies without invalidating the signature the daemon will
@@ -753,6 +756,8 @@ fn scope_indicates_broad_grant(scope: &str) -> bool {
         || scope.contains("file-transfer: host-to-viewer send")
         || scope.contains("file-transfer: viewer-to-host receive")
         || scope.contains("file-transfer: bidirectional")
+        || scope.contains("audio: host device capture")
+        || scope.contains("telemetry: system identity and performance")
 }
 
 /// `POST /v1/sign/consent-action` -- sign a session-bound consent decision
@@ -1487,6 +1492,30 @@ mod tests {
     /// the request bodies built by the `*_request_body`/`handshake_begin_body`
     /// helpers pointed at the same pin-store slot.
     const TEST_DAEMON_ENDPOINT: &str = "https://daemon.test.example";
+
+    #[test]
+    fn broad_consent_classifier_covers_private_capture_and_identity_scopes() {
+        assert!(scope_indicates_broad_grant("audio: host device capture"));
+        assert!(scope_indicates_broad_grant(
+            "telemetry: system identity and performance"
+        ));
+        assert!(scope_indicates_broad_grant("input: viewer may inject"));
+        assert!(scope_indicates_broad_grant(
+            "clipboard: host-to-viewer disclosure"
+        ));
+        assert!(scope_indicates_broad_grant(
+            "file-transfer: viewer-to-host receive"
+        ));
+    }
+
+    #[test]
+    fn broad_consent_classifier_keeps_synthetic_and_basic_scopes_narrow() {
+        assert!(!scope_indicates_broad_grant("audio: synthetic test signal"));
+        assert!(!scope_indicates_broad_grant("telemetry: basic host performance"));
+        assert!(!scope_indicates_broad_grant(
+            "display: screen stream; telemetry: off; audio: off; input: off; clipboard: off; file-transfer: off"
+        ));
+    }
 
     #[test]
     fn constant_time_eq_matches_equal_and_rejects_different_or_wrong_length() {
@@ -2711,6 +2740,77 @@ mod tests {
         let (status, json) = post_signed_json(app, "/v1/sign/consent-action", "secret", body).await;
         assert_eq!(status, StatusCode::PRECONDITION_REQUIRED, "body: {json}");
         assert_eq!(json["code"], "confirmation_required");
+    }
+
+    #[tokio::test]
+    async fn sign_consent_action_requires_confirmation_for_system_identity_telemetry_on_pinned_host() {
+        let (host, http_auth, http_auth_ml_dsa) = test_daemon_identity();
+        let state = test_state_with_pinned_host(
+            "secret",
+            &["http://localhost:8134"],
+            &host,
+            "highsec",
+            false,
+        );
+        let app = build_router(state);
+        let cert = test_certificate(&host, &http_auth, &http_auth_ml_dsa);
+        let token = test_token(&http_auth, &http_auth_ml_dsa, [0x22u8; 16]);
+        let scope = "display: screen stream; telemetry: system identity and performance; audio: off; input: off; clipboard: off; file-transfer: off";
+        let body = consent_action_request_body(
+            &cert,
+            &token,
+            serde_json::json!({"scope": scope}),
+        );
+        let (status, json) = post_signed_json(app, "/v1/sign/consent-action", "secret", body).await;
+        assert_eq!(status, StatusCode::PRECONDITION_REQUIRED, "body: {json}");
+        assert_eq!(json["code"], "confirmation_required");
+    }
+
+    #[tokio::test]
+    async fn sign_consent_action_requires_confirmation_for_host_audio_capture_on_pinned_host() {
+        let (host, http_auth, http_auth_ml_dsa) = test_daemon_identity();
+        let state = test_state_with_pinned_host(
+            "secret",
+            &["http://localhost:8134"],
+            &host,
+            "highsec",
+            false,
+        );
+        let app = build_router(state);
+        let cert = test_certificate(&host, &http_auth, &http_auth_ml_dsa);
+        let token = test_token(&http_auth, &http_auth_ml_dsa, [0x22u8; 16]);
+        let scope = "display: screen stream; telemetry: off; audio: host device capture; input: off; clipboard: off; file-transfer: off";
+        let body = consent_action_request_body(
+            &cert,
+            &token,
+            serde_json::json!({"scope": scope}),
+        );
+        let (status, json) = post_signed_json(app, "/v1/sign/consent-action", "secret", body).await;
+        assert_eq!(status, StatusCode::PRECONDITION_REQUIRED, "body: {json}");
+        assert_eq!(json["code"], "confirmation_required");
+    }
+
+    #[tokio::test]
+    async fn sign_consent_action_does_not_require_extra_confirmation_for_basic_telemetry_or_synthetic_audio() {
+        let (host, http_auth, http_auth_ml_dsa) = test_daemon_identity();
+        let state = test_state_with_pinned_host(
+            "secret",
+            &["http://localhost:8134"],
+            &host,
+            "highsec",
+            false,
+        );
+        let app = build_router(state);
+        let cert = test_certificate(&host, &http_auth, &http_auth_ml_dsa);
+        let token = test_token(&http_auth, &http_auth_ml_dsa, [0x22u8; 16]);
+        let scope = "display: screen stream; telemetry: basic host performance; audio: synthetic test signal; input: off; clipboard: off; file-transfer: off";
+        let body = consent_action_request_body(
+            &cert,
+            &token,
+            serde_json::json!({"scope": scope}),
+        );
+        let (status, json) = post_signed_json(app, "/v1/sign/consent-action", "secret", body).await;
+        assert_eq!(status, StatusCode::OK, "body: {json}");
     }
 
     #[tokio::test]
