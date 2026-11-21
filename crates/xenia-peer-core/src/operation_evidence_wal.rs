@@ -443,6 +443,10 @@ impl DurableOperationEvidenceJournal {
             sync_parent_directory(&journal.path)?;
         }
         journal.replay_existing()?;
+        // Stabilize the fully verified recovered prefix before any caller
+        // can observe a committed state or dispatch a new protected effect.
+        // This also re-establishes durability after a prior sync error.
+        journal.file.sync_all()?;
         journal.recover_interrupted_attempts()?;
         Ok(journal)
     }
