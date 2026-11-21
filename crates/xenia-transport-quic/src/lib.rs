@@ -305,6 +305,15 @@ async fn write_all_cancel_safe(
     Ok(())
 }
 
+/// Reject any further operation after a framed read/write was cancelled.
+fn ensure_stream_side_open(terminal: bool) -> Result<(), TransportError> {
+    if terminal {
+        Err(TransportError::UnexpectedEof)
+    } else {
+        Ok(())
+    }
+}
+
 /// RAII guard for one in-flight framed operation on a QUIC stream direction.
 ///
 /// If the future is dropped before `complete`, the direction is marked
