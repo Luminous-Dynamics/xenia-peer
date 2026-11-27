@@ -625,39 +625,37 @@ impl TransportDispatchGate {
         receipt_digest: [u8; 32],
     ) -> Result<DispatchReconciliationReceipt, DispatchGateError> {
         let mut inner = self.lock()?;
+        if let Some(existing) = inner.recent_reconciliations.get(&operation_id) {
+            return if existing.outcome == outcome && existing.receipt_digest == receipt_digest {
+                Ok(*existing)
+            } else {
+                Err(DispatchGateError::ReconciliationConflict)
+            };
+        }
         let record = inner
             .operations
-            .get_mut(&operation_id)
-            .ok_or(DispatchGateError::OperationNotFound)?;
-        match record.state {
-            OperationState::Unknown { evidence_digest } => {
-                record.state = OperationState::Reconciled {
-                    original_unknown_digest: evidence_digest,
-                    outcome,
-                    receipt_digest,
-                };
-                Ok(DispatchReconciliationReceipt {
-                    operation_id,
-                    original_unknown_digest: evidence_digest,
-                    outcome,
-                    receipt_digest,
-                })
+            .get(&operation_id)
+            .copied()
+            .ok_or(DispatchGateError::UnknownOperationNotFound)?;
+        let OperationState::Unknown { evidence_digest } = record.state else {
+            return Err(DispatchGateError::UnknownOperationNotFound);
+        };
+        let receipt = DispatchReconciliationReceipt {
+            operation_id,
+            original_unknown_digest: evidence_digest,
+            outcome,
+            receipt_digest,
+        };
+        inner.operations.remove(&operation_id);
+        inner.recent_reconciliations.insert(operation_id, receipt);
+        inner.reconciliation_order.push_back(operation_id);
+        while inner.reconciliation_order.len() > MAX_RECENT_DISPATCH_RECONCILIATIONS {
+            if let Some(expired) = inner.reconciliation_order.pop_front() {
+                inner.recent_reconciliations.remove(&expired);
             }
-            OperationState::Reconciled {
-                original_unknown_digest,
-                outcome: existing_outcome,
-                receipt_digest: existing_digest,
-            } if existing_outcome == outcome && existing_digest == receipt_digest => {
-                Ok(DispatchReconciliationReceipt {
-                    operation_id,
-                    original_unknown_digest,
-                    outcome,
-                    receipt_digest,
-                })
-            }
-            OperationState::Reconciled { .. } => Err(DispatchGateError::ReconciliationConflict),
-            _ => Err(DispatchGateError::UnknownOperationNotFound),
         }
+        inner.reconciled_total = inner.reconciled_total.saturating_add(1);
+        Ok(receipt)
     }
 
     /// Reactivate after new external authority/consent is independently
