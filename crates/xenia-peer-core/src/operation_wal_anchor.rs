@@ -1074,6 +1074,144 @@ mod tests {
         bundle
     }
 
+
+    /// Deterministic in-memory reference implementation for CAS protocol tests.
+    ///
+    /// This is not a production independent witness store. It deliberately
+    /// keeps the same atomic mutex around compare/validate/persist so the
+    /// tests can exercise single-winner semantics and crash-response readback.
+    struct MemoryWitnessStore {
+        checkpoints: std::sync::Mutex<
+            std::collections::HashMap<([u8; 32], u64), OperationWalWitnessBundle>,
+        >,
+        leases: std::sync::Mutex<
+            std::collections::HashMap<[u8; 32], OperationSequenceLeaseBundle>,
+        >,
+        keys: [SigningKey; 2],
+    }
+
+    impl MemoryWitnessStore {
+        fn new() -> Self {
+            Self {
+                checkpoints: std::sync::Mutex::new(std::collections::HashMap::new()),
+                leases: std::sync::Mutex::new(std::collections::HashMap::new()),
+                keys: [signing_key(1), signing_key(2)],
+            }
+        }
+
+        fn sign_checkpoint(
+            &self,
+            checkpoint: OperationWalCheckpoint,
+        ) -> Result<OperationWalWitnessBundle, OperationWalWitnessStoreError> {
+            let mut bundle = OperationWalWitnessBundle::new(checkpoint)
+                .map_err(|_| OperationWalWitnessStoreError::CandidateRejected)?;
+            for key in &self.keys {
+                bundle
+                    .sign_with(key, bundle.checkpoint.timestamp_unix_secs)
+                    .map_err(|_| OperationWalWitnessStoreError::CandidateRejected)?;
+            }
+            Ok(bundle)
+        }
+
+        fn sign_lease(
+            &self,
+            lease: OperationSequenceLease,
+        ) -> Result<OperationSequenceLeaseBundle, OperationWalWitnessStoreError> {
+            let mut bundle = OperationSequenceLeaseBundle::new(lease)
+                .map_err(|_| OperationWalWitnessStoreError::CandidateRejected)?;
+            for key in &self.keys {
+                bundle
+                    .sign_with(key, bundle.lease.issued_at_unix_secs)
+                    .map_err(|_| OperationWalWitnessStoreError::CandidateRejected)?;
+            }
+            Ok(bundle)
+        }
+    }
+
+    impl OperationWalWitnessStore for MemoryWitnessStore {
+        fn latest_checkpoint(
+            &self,
+            session_fingerprint: [u8; 32],
+            clock_domain: u64,
+        ) -> Result<Option<OperationWalWitnessBundle>, OperationWalWitnessStoreError> {
+            self.checkpoints
+                .lock()
+                .map_err(|_| OperationWalWitnessStoreError::Unavailable)
+                .map(|state| state.get(&(session_fingerprint, clock_domain)).cloned())
+        }
+
+        fn compare_and_advance_checkpoint(
+            &self,
+            expected_previous_fingerprint: Option<[u8; 32]>,
+            candidate: OperationWalCheckpoint,
+            extension: OperationWalHeadExtension,
+        ) -> Result<OperationWalWitnessBundle, OperationWalWitnessStoreError> {
+            let key = (candidate.session_fingerprint, candidate.clock_domain);
+            let mut state = self
+                .checkpoints
+                .lock()
+                .map_err(|_| OperationWalWitnessStoreError::Unavailable)?;
+            let previous = state.get(&key).cloned();
+            let actual_previous_fingerprint = previous
+                .as_ref()
+                .map(|bundle| operation_wal_checkpoint_fingerprint(&bundle.checkpoint))
+                .transpose()
+                .map_err(|_| OperationWalWitnessStoreError::CandidateRejected)?;
+            if actual_previous_fingerprint != expected_previous_fingerprint {
+                return Err(OperationWalWitnessStoreError::StaleExpectedHead);
+            }
+            extension
+                .verify(previous.as_ref().map(|bundle| &bundle.checkpoint), &candidate)
+                .map_err(|_| OperationWalWitnessStoreError::CandidateRejected)?;
+            let bundle = self.sign_checkpoint(candidate)?;
+            state.insert(key, bundle.clone());
+            Ok(bundle)
+        }
+
+        fn latest_sequence_lease(
+            &self,
+            session_fingerprint: [u8; 32],
+        ) -> Result<Option<OperationSequenceLeaseBundle>, OperationWalWitnessStoreError> {
+            self.leases
+                .lock()
+                .map_err(|_| OperationWalWitnessStoreError::Unavailable)
+                .map(|state| state.get(&session_fingerprint).cloned())
+        }
+
+        fn compare_and_advance_sequence_lease(
+            &self,
+            expected_previous_fingerprint: Option<[u8; 32]>,
+            candidate: OperationSequenceLease,
+        ) -> Result<OperationSequenceLeaseBundle, OperationWalWitnessStoreError> {
+            let session = candidate.session_fingerprint;
+            let mut state = self
+                .leases
+                .lock()
+                .map_err(|_| OperationWalWitnessStoreError::Unavailable)?;
+            let previous = state.get(&session).cloned();
+            let actual_previous_fingerprint = previous
+                .as_ref()
+                .map(|bundle| operation_sequence_lease_fingerprint(&bundle.lease))
+                .transpose()
+                .map_err(|_| OperationWalWitnessStoreError::CandidateRejected)?;
+            if actual_previous_fingerprint != expected_previous_fingerprint {
+                return Err(OperationWalWitnessStoreError::StaleExpectedHead);
+            }
+            if let Some(previous) = previous.as_ref() {
+                verify_sequence_lease_successor(&previous.lease, &candidate)
+                    .map_err(|_| OperationWalWitnessStoreError::CandidateRejected)?;
+            } else if candidate.lease_generation != 1
+                || candidate.previous_lease_fingerprint != [0; 32]
+                || candidate.first_operation_sequence != 1
+            {
+                return Err(OperationWalWitnessStoreError::CandidateRejected);
+            }
+            let bundle = self.sign_lease(candidate)?;
+            state.insert(session, bundle.clone());
+            Ok(bundle)
+        }
+    }
+
     #[test]
     fn checkpoint_quorum_verifies_and_rejects_an_untrusted_witness() {
         let bundle = witnessed_checkpoint(checkpoint(None, 0, [0; 32], 100));
