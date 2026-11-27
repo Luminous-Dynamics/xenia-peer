@@ -1290,7 +1290,7 @@ mod tests {
 
             let dispatch_state = Arc::clone(&state);
             let dispatch = thread::spawn(move || {
-                let mut state = dispatch_state.lock().expect("model lock poisoned");
+                let mut state = dispatch_state.lock().unwrap_or_else(|_| panic!("model lock poisoned"));
                 if state.active && state.prepared {
                     state.prepared = false;
                     state.in_flight = true;
@@ -1324,9 +1324,13 @@ mod tests {
 
             let dispatch_admitted = dispatch
                 .join()
-                .expect("model dispatch thread panicked");
-            finish.join().expect("model finish thread panicked");
-            revoke.join().expect("model revoke thread panicked");
+                .unwrap_or_else(|_| panic!("model dispatch thread panicked"));
+            finish
+                .join()
+                .unwrap_or_else(|_| panic!("model finish thread panicked"));
+            revoke
+                .join()
+                .unwrap_or_else(|_| panic!("model revoke thread panicked"));
 
             let state = state.lock().expect("model lock poisoned");
             assert!(!state.in_flight);
