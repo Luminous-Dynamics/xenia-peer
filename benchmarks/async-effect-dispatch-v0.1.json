@@ -277,5 +277,43 @@
     "nats_jetstream": "Compare durable stream replay/acknowledgement behavior and redelivery under restart.",
     "postgresql": "Compare durable journal sync and recovery behavior against configured WAL/fsync/synchronous_commit semantics.",
     "tuf": "Use persisted monotonic checkpoints and freshness/expiry checks as the rollback/freeze-resistance reference."
+  },
+  "concurrency_qualification": {
+    "loom_exhaustive_model": {
+      "status": "implemented_in_this_pr",
+      "scope": "reduced three-thread admission/completion/revoke state model",
+      "does_not_prove": "full production implementation or network behavior"
+    },
+    "production_threaded_race": {
+      "status": "implemented_in_this_pr",
+      "iterations": 32,
+      "replay": "standard Rust thread test; extend with deterministic schedule record"
+    },
+    "shuttle_random_schedule": {
+      "status": "planned_not_implemented",
+      "requirements": [
+        "persist scheduler seed",
+        "replay failing schedule",
+        "record preemption bound"
+      ]
+    },
+    "jepsen_style_black_box": {
+      "status": "planned_not_implemented",
+      "requirements": [
+        "multi-process histories",
+        "network nemesis",
+        "process kill/restart",
+        "linearizability/history checker"
+      ]
+    },
+    "foundationdb_style_deterministic_simulation": {
+      "status": "research_target",
+      "requirements": [
+        "virtual time",
+        "injectable transport and disk",
+        "seeded packet/disk/clock/process faults",
+        "deterministic replay"
+      ]
+    }
   }
 }
