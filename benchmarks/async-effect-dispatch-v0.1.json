@@ -12,7 +12,8 @@
     "evidence_signatures": "external_to_gate",
     "operation_id_scheme": "BLAKE3-128(session fingerprint || authority epoch || lane || direction || monotonic per-session operation sequence || context digest)",
     "active_state_retention": "prepared/in-flight/unknown only; accepted and cancelled records leave active map",
-    "reconciliation_cache": "bounded recent cache of 1024; durable WAL is long-term idempotency authority"
+    "reconciliation_cache": "bounded recent cache of 1024; durable WAL is long-term idempotency authority",
+    "hot_path_state_accounting": "incremental prepared/in-flight/unknown counters; admission and reactivation decisions average O(1); revoke enumerates bounded in-flight IDs O(outstanding)"
   },
   "invariants": {
     "no_gate_mutex_held_across_await": true,
@@ -245,6 +246,15 @@
       "task-abort",
       "process-kill-after-wal-attempt",
       "reconnect-and-replay-same-operation-id"
+    ],
+    "metrics": [
+      "prepare_dispatch_latency_p50_p95_p99_p999",
+      "begin_dispatch_latency_p50_p95_p99_p999",
+      "completion_latency_p50_p95_p99_p999",
+      "revoke_latency_vs_outstanding_count",
+      "gate_cpu_per_operation",
+      "bytes_per_outstanding_operation",
+      "memory_growth_over_10m_completed_operations"
     ]
   },
   "provisional_targets_not_results": {
