@@ -1338,6 +1338,186 @@ mod tests {
     }
 
     #[test]
+    fn witness_store_atomically_advances_checkpoint_and_supports_readback() {
+        let store = MemoryWitnessStore::new();
+        let first = checkpoint(None, 2, [2; 32], 100);
+        let first_extension = OperationWalHeadExtension {
+            base_sequence: 0,
+            base_head_hash: [0; 32],
+            records: vec![
+                OperationWalHeadRecord {
+                    sequence: 1,
+                    previous_hash: [0; 32],
+                    record_hash: [1; 32],
+                },
+                OperationWalHeadRecord {
+                    sequence: 2,
+                    previous_hash: [1; 32],
+                    record_hash: [2; 32],
+                },
+            ],
+        };
+        let first_bundle = store
+            .compare_and_advance_checkpoint(None, first, first_extension)
+            .unwrap_or_else(|error| panic!("first checkpoint advance failed: {error:?}"));
+        assert!(verify_checkpoint_witness_quorum(&first_bundle, &witness_policy()).is_ok());
+
+        let second = checkpoint(Some(&first_bundle.checkpoint), 4, [4; 32], 101);
+        let second_extension = OperationWalHeadExtension {
+            base_sequence: 2,
+            base_head_hash: [2; 32],
+            records: vec![
+                OperationWalHeadRecord {
+                    sequence: 3,
+                    previous_hash: [2; 32],
+                    record_hash: [3; 32],
+                },
+                OperationWalHeadRecord {
+                    sequence: 4,
+                    previous_hash: [3; 32],
+                    record_hash: [4; 32],
+                },
+            ],
+        };
+        let expected = operation_wal_checkpoint_fingerprint(&first_bundle.checkpoint)
+            .unwrap_or_else(|error| panic!("checkpoint fingerprint failed: {error:?}"));
+        let second_bundle = store
+            .compare_and_advance_checkpoint(Some(expected), second, second_extension)
+            .unwrap_or_else(|error| panic!("second checkpoint advance failed: {error:?}"));
+        assert_eq!(second_bundle.checkpoint.witness_sequence, 2);
+
+        let retained = store
+            .latest_checkpoint([7; 32], 11)
+            .unwrap_or_else(|error| panic!("checkpoint readback failed: {error:?}"))
+            .unwrap_or_else(|| panic!("latest checkpoint missing"));
+        assert_eq!(retained, second_bundle);
+        assert!(verify_checkpoint_witness_quorum(&retained, &witness_policy()).is_ok());
+    }
+
+    #[test]
+    fn witness_store_rejects_broken_extension_without_mutating_head() {
+        let store = MemoryWitnessStore::new();
+        let candidate = checkpoint(None, 2, [2; 32], 100);
+        let broken = OperationWalHeadExtension {
+            base_sequence: 0,
+            base_head_hash: [0; 32],
+            records: vec![
+                OperationWalHeadRecord {
+                    sequence: 1,
+                    previous_hash: [0; 32],
+                    record_hash: [1; 32],
+                },
+                OperationWalHeadRecord {
+                    sequence: 2,
+                    previous_hash: [88; 32],
+                    record_hash: [2; 32],
+                },
+            ],
+        };
+        assert_eq!(
+            store.compare_and_advance_checkpoint(None, candidate, broken),
+            Err(OperationWalWitnessStoreError::CandidateRejected)
+        );
+        assert!(
+            store.latest_checkpoint([7; 32], 11)
+                .unwrap_or_else(|error| panic!("checkpoint readback failed: {error:?}"))
+                .is_none(),
+            "invalid extension must not advance witness state"
+        );
+    }
+
+    #[test]
+    fn concurrent_checkpoint_compare_and_advance_has_one_winner() {
+        use std::sync::{Arc, Barrier};
+        use std::thread;
+
+        let store = Arc::new(MemoryWitnessStore::new());
+        let candidate = checkpoint(None, 2, [2; 32], 100);
+        let extension = OperationWalHeadExtension {
+            base_sequence: 0,
+            base_head_hash: [0; 32],
+            records: vec![
+                OperationWalHeadRecord {
+                    sequence: 1,
+                    previous_hash: [0; 32],
+                    record_hash: [1; 32],
+                },
+                OperationWalHeadRecord {
+                    sequence: 2,
+                    previous_hash: [1; 32],
+                    record_hash: [2; 32],
+                },
+            ],
+        };
+        let barrier = Arc::new(Barrier::new(3));
+        let mut workers = Vec::new();
+        for _ in 0..2 {
+            let worker_store = Arc::clone(&store);
+            let worker_barrier = Arc::clone(&barrier);
+            let worker_candidate = candidate.clone();
+            let worker_extension = extension.clone();
+            workers.push(thread::spawn(move || {
+                worker_barrier.wait();
+                worker_store.compare_and_advance_checkpoint(
+                    None,
+                    worker_candidate,
+                    worker_extension,
+                )
+            }));
+        }
+        barrier.wait();
+        let results: Vec<_> = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap_or_else(|_| panic!("witness worker panicked")))
+            .collect();
+        let successes = results.iter().filter(|result| result.is_ok()).count();
+        let stale = results.iter().filter(|result| {
+            **result == Err(OperationWalWitnessStoreError::StaleExpectedHead)
+        }).count();
+        assert_eq!(successes, 1);
+        assert_eq!(stale, 1);
+        let retained = store
+            .latest_checkpoint([7; 32], 11)
+            .unwrap_or_else(|error| panic!("checkpoint readback failed: {error:?}"));
+        assert!(retained.is_some());
+    }
+
+    #[test]
+    fn witness_store_reserves_nonoverlapping_leases_and_readback_resolves_lost_reply() {
+        let store = MemoryWitnessStore::new();
+        let first = OperationSequenceLease::next(
+            None, [7; 32], 4, [10; 32], 100, 100, 200,
+        ).unwrap_or_else(|error| panic!("first lease proposal failed: {error:?}"));
+        let first_bundle = store
+            .compare_and_advance_sequence_lease(None, first)
+            .unwrap_or_else(|error| panic!("first lease advance failed: {error:?}"));
+        assert!(verify_sequence_lease_witness_quorum(&first_bundle, &witness_policy()).is_ok());
+
+        let previous_fingerprint = operation_sequence_lease_fingerprint(&first_bundle.lease)
+            .unwrap_or_else(|error| panic!("lease fingerprint failed: {error:?}"));
+        let second = OperationSequenceLease::next(
+            Some(&first_bundle.lease), [7; 32], 5, [11; 32], 100, 201, 301,
+        ).unwrap_or_else(|error| panic!("second lease proposal failed: {error:?}"));
+
+        // Simulate a caller that lost the successful response: read back the
+        // independently retained lease instead of issuing a different range.
+        let second_bundle = store
+            .compare_and_advance_sequence_lease(Some(previous_fingerprint), second)
+            .unwrap_or_else(|error| panic!("second lease advance failed: {error:?}"));
+        let retained = store
+            .latest_sequence_lease([7; 32])
+            .unwrap_or_else(|error| panic!("lease readback failed: {error:?}"))
+            .unwrap_or_else(|| panic!("latest lease missing"));
+        assert_eq!(retained, second_bundle);
+        assert_eq!(retained.lease.first_operation_sequence, 101);
+        assert_eq!(retained.lease.last_operation_sequence, 200);
+        assert_eq!(
+            store.compare_and_advance_sequence_lease(None, retained.lease.clone()),
+            Err(OperationWalWitnessStoreError::StaleExpectedHead)
+        );
+    }
+
+    #[test]
     fn invalid_lease_ranges_and_freshness_fail_closed() {
         assert_eq!(
             OperationSequenceLease::next(None, [7; 32], 1, [1; 32], 0, 10, 20),
