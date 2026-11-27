@@ -26,6 +26,7 @@
 //! never be restored from the WAL.
 
 use std::collections::BTreeSet;
+use std::time::{Duration, Instant};
 
 use ed25519_dalek::{
     Signature, Signer, SigningKey, Verifier as DalekVerifier, VerifyingKey,
@@ -446,12 +447,13 @@ pub struct OperationSequenceLeaseBundle {
 #[derive(Debug)]
 pub struct VerifiedOperationSequenceLease {
     lease: OperationSequenceLease,
+    monotonic_expiry: Instant,
 }
 
 impl VerifiedOperationSequenceLease {
     /// Whether an operation sequence belongs to the verified reserved range.
     pub fn contains(&self, operation_sequence: u64) -> bool {
-        self.lease.contains(operation_sequence)
+        Instant::now() <= self.monotonic_expiry && self.lease.contains(operation_sequence)
     }
 
     /// First sequence in the verified lease, inclusive.
@@ -499,10 +501,18 @@ pub enum OperationWalAnchorError {
     NonMonotonicWitnessSequence,
     /// WAL sequence regressed.
     #[error("operation-WAL sequence regressed")]
-    WalSequenceRegressed { previous: u64, candidate: u64 },
+    WalSequenceRegressed {
+        /// Prior independently witnessed WAL sequence.
+        previous: u64,
+        /// Candidate WAL sequence.
+        candidate: u64,
+    },
     /// Two heads at the same WAL sequence differ.
     #[error("operation-WAL fork detected at one sequence")]
-    WalFork { sequence: u64 },
+    WalFork {
+        /// Conflicting WAL sequence.
+        sequence: u64,
+    },
     /// Genesis sequence/head combination is invalid.
     #[error("operation-WAL genesis head must use sequence zero and zero hash")]
     GenesisHeadMismatch,
@@ -514,19 +524,39 @@ pub enum OperationWalAnchorError {
     ExtensionLengthMismatch { expected: u64, observed: usize },
     /// Extension record sequence is out of order.
     #[error("operation-WAL extension sequence mismatch")]
-    ExtensionSequenceMismatch { index: usize, expected: u64, observed: u64 },
+    ExtensionSequenceMismatch {
+        /// Position of the malformed extension record.
+        index: usize,
+        /// Expected absolute sequence number.
+        expected: u64,
+        /// Observed absolute sequence number.
+        observed: u64,
+    },
     /// Previous hash does not match prior record.
     #[error("operation-WAL extension has broken previous-hash link")]
-    ExtensionBrokenLink { sequence: u64 },
+    ExtensionBrokenLink {
+        /// WAL sequence whose previous-hash link failed.
+        sequence: u64,
+    },
     /// Final extension hash differs from candidate head.
     #[error("operation-WAL extension head mismatch")]
     ExtensionHeadMismatch,
     /// Candidate local WAL is behind the witnessed checkpoint.
     #[error("local operation-WAL rollback detected")]
-    LocalWalRollback { checkpoint: u64, local: u64 },
+    LocalWalRollback {
+        /// Latest independently witnessed sequence.
+        checkpoint: u64,
+        /// Sequence present in the local WAL.
+        local: u64,
+    },
     /// Candidate local WAL is ahead but its suffix is not externally witnessed.
     #[error("local operation-WAL contains an unanchored suffix")]
-    UnanchoredWalSuffix { checkpoint: u64, local: u64 },
+    UnanchoredWalSuffix {
+        /// Latest independently witnessed sequence.
+        checkpoint: u64,
+        /// Newer local sequence not yet externally witnessed.
+        local: u64,
+    },
     /// Local head hash differs at the witnessed sequence.
     #[error("local operation-WAL head does not match checkpoint")]
     LocalWalHeadMismatch,
@@ -929,7 +959,11 @@ pub fn verify_sequence_lease_for_use(
     if now_unix_secs < lease.issued_at_unix_secs || now_unix_secs > lease.expires_at_unix_secs {
         return Err(OperationWalAnchorError::LeaseExpired);
     }
-    Ok(VerifiedOperationSequenceLease { lease: lease.clone() })
+    let remaining_secs = lease.expires_at_unix_secs.saturating_sub(now_unix_secs);
+    let monotonic_expiry = Instant::now()
+        .checked_add(Duration::from_secs(remaining_secs))
+        .ok_or(OperationWalAnchorError::LeaseExpired)?;
+    Ok(VerifiedOperationSequenceLease { lease: lease.clone(), monotonic_expiry })
 }
 
 fn validate_checkpoint(checkpoint: &OperationWalCheckpoint) -> Result<(), OperationWalAnchorError> {
