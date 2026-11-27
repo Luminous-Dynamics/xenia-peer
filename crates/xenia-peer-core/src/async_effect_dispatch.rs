@@ -384,9 +384,7 @@ enum GatePhase {
 enum OperationState {
     Prepared,
     InFlight,
-    Unknown {
-        evidence_digest: [u8; 32],
-    },
+    Unknown { evidence_digest: [u8; 32] },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -722,7 +720,7 @@ impl TransportDispatchGate {
     /// Return a bounded snapshot of local dispatch state.
     pub fn snapshot(&self) -> Result<DispatchGateSnapshot, DispatchGateError> {
         let inner = self.lock()?;
-        let mut snapshot = DispatchGateSnapshot {
+        let snapshot = DispatchGateSnapshot {
             session_fingerprint: inner.session_fingerprint,
             authority_epoch: inner.authority_epoch,
             active: inner.phase == GatePhase::Active,
@@ -1292,7 +1290,9 @@ mod tests {
 
             let dispatch_state = Arc::clone(&state);
             let dispatch = thread::spawn(move || {
-                let mut state = dispatch_state.lock().unwrap_or_else(|_| panic!("model lock poisoned"));
+                let mut state = dispatch_state
+                    .lock()
+                    .unwrap_or_else(|_| panic!("model lock poisoned"));
                 if state.active && state.prepared {
                     state.prepared = false;
                     state.in_flight = true;
@@ -1304,7 +1304,9 @@ mod tests {
 
             let finish_state = Arc::clone(&state);
             let finish = thread::spawn(move || {
-                let mut state = finish_state.lock().unwrap_or_else(|_| panic!("model lock poisoned"));
+                let mut state = finish_state
+                    .lock()
+                    .unwrap_or_else(|_| panic!("model lock poisoned"));
                 if state.in_flight {
                     state.in_flight = false;
                     state.accepted = true;
@@ -1313,7 +1315,9 @@ mod tests {
 
             let revoke_state = Arc::clone(&state);
             let revoke = thread::spawn(move || {
-                let mut state = revoke_state.lock().unwrap_or_else(|_| panic!("model lock poisoned"));
+                let mut state = revoke_state
+                    .lock()
+                    .unwrap_or_else(|_| panic!("model lock poisoned"));
                 state.active = false;
                 if state.prepared {
                     state.prepared = false;
@@ -1334,7 +1338,9 @@ mod tests {
                 .join()
                 .unwrap_or_else(|_| panic!("model revoke thread panicked"));
 
-            let state = state.lock().unwrap_or_else(|_| panic!("model lock poisoned"));
+            let state = state
+                .lock()
+                .unwrap_or_else(|_| panic!("model lock poisoned"));
             assert!(!state.in_flight);
             if dispatch_admitted {
                 assert!(
@@ -1349,5 +1355,4 @@ mod tests {
             }
         });
     }
-
 }
