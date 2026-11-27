@@ -28,7 +28,9 @@ The async dispatch gate makes that contract explicit without keeping a lock acro
 5. CancelledBeforeDispatch: a prepared permit was dropped or invalidated before dispatch.
 6. Reconciled: an external verifier has authenticated a receipt resolving the exact UNKNOWN operation.
 
-Operation IDs remain consumed after cancellation and reconciliation. New operations are blocked while UNKNOWN remains.
+Operation IDs are deterministically derived from session fingerprint, authority epoch, permission lane, direction, monotonic per-session operation sequence, and context digest. The sequence never resets across rekey/regrant, so a completed operation cannot be replayed by presenting an old sequence.
+
+The active map retains only prepared, in-flight and UNKNOWN operations. Accepted/cancelled operations are retired from that map; the 4,096 limit is an outstanding-operation bound, not a lifetime-operation bound. A bounded 1,024-entry reconciliation cache provides recent in-memory idempotency; the durable WAL is the long-term source of truth.
 
 ## Adapter sequence for live Xenia senders
 
