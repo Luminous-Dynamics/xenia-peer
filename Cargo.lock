@@ -9782,6 +9782,7 @@ dependencies = [
  "bincode",
  "blake3",
  "ed25519-dalek 2.2.0",
+ "loom",
  "opus",
  "rand 0.8.7",
  "serde",
