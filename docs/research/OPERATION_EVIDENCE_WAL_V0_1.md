@@ -81,6 +81,8 @@ These tests are authored but are not claimed to have passed until exact-head CI 
 - No live wiring into `M1RuntimeSession`, `InputEffectExecution`, clipboard wrappers, file-transfer routes or the consent socket.
 - No signed journal export, independent signer binding, cross-file artifact manifest, or evidence bundle verifier integration.
 
+The public `head_candidate()` accessor exports the payload-free tuple `(session_fingerprint, clock_domain, journal_sequence, wal_chain_digest, last_operation_sequence)`. This is not itself an authenticated anchor. A caller must durably accept it in a separate trust domain and verify it during recovery before accepting later work. The operation sequence is used by the async dispatch gate to restore its high-water mark.
+
 **Local integrity boundary:** the BLAKE3 chain is unkeyed and has no trusted external head by itself. It detects malformed records, interior mutation, reordering, and broken links in the retained prefix, but it cannot detect deletion of a complete valid suffix, restoration of an older valid journal, or a full rewrite by an actor who can modify the file and recompute the chain. Therefore this WAL alone is not tamper-proof or rollback-proof against a malicious local writer. A consumer that needs that property must independently persist/authenticate at least `(journal_sequence, wal_chain_digest)` in a separate trust domain and reject a journal whose recovered head does not match or advance that checkpoint. Such anchoring is not implemented by this PR.
 - No cross-process distributed lock beyond one local create-new lock file.
 - No remote receipt protocol, receiver deduplication store or operation replay response endpoint.
