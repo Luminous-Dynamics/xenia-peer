@@ -378,13 +378,9 @@ enum GatePhase {
 enum OperationState {
     Prepared,
     InFlight,
-    AcceptedByTransport {
-        evidence_digest: [u8; 32],
-    },
     Unknown {
         evidence_digest: [u8; 32],
     },
-    CancelledBeforeDispatch,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -711,21 +707,15 @@ impl TransportDispatchGate {
             prepared_operations: 0,
             in_flight_operations: 0,
             unknown_operations: 0,
-            accepted_operations: 0,
-            cancelled_before_dispatch: 0,
+            accepted_operations: inner.accepted_total,
+            cancelled_before_dispatch: inner.cancelled_before_dispatch_total,
+            reconciled_operations: inner.reconciled_total,
         };
         for record in inner.operations.values() {
             match record.state {
                 OperationState::Prepared => snapshot.prepared_operations += 1,
                 OperationState::InFlight => snapshot.in_flight_operations += 1,
                 OperationState::Unknown { .. } => snapshot.unknown_operations += 1,
-                OperationState::AcceptedByTransport { .. } => {
-                    snapshot.accepted_operations += 1;
-                }
-                OperationState::CancelledBeforeDispatch => {
-                    snapshot.cancelled_before_dispatch += 1;
-                }
-                OperationState::Reconciled { .. } => {}
             }
         }
         Ok(snapshot)
