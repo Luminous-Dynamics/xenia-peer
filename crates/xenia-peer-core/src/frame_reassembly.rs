@@ -424,9 +424,7 @@ impl FrameReassembler {
                 return Err(FrameFragmentError::ReassemblyBytesFull);
             }
             let count = usize::from(fragment.fragment_count);
-            if self.reserved_fragments.saturating_add(count)
-                > self.config.max_total_fragments
-            {
+            if self.reserved_fragments.saturating_add(count) > self.config.max_total_fragments {
                 return Err(FrameFragmentError::FragmentDescriptorCapacityFull);
             }
             self.reserved_bytes = self
@@ -448,15 +446,12 @@ impl FrameReassembler {
             );
         }
 
-        let exceeds_declared_size = self
-            .assemblies
-            .get(&fragment.key)
-            .is_some_and(|assembly| {
-                assembly
-                    .received_bytes
-                    .saturating_add(fragment.payload.len())
-                    > assembly.total_frame_bytes
-            });
+        let exceeds_declared_size = self.assemblies.get(&fragment.key).is_some_and(|assembly| {
+            assembly
+                .received_bytes
+                .saturating_add(fragment.payload.len())
+                > assembly.total_frame_bytes
+        });
         if exceeds_declared_size {
             self.remove_assembly(fragment.key);
             self.record_terminal(fragment.key);
@@ -569,13 +564,13 @@ impl FrameReassembler {
     }
 
     fn observe_clock(&mut self, now_ticks: u64) -> Result<(), FrameFragmentError> {
-        if let Some(previous) = self.last_now_ticks {
-            if now_ticks < previous {
-                return Err(FrameFragmentError::ClockRegression {
-                    previous,
-                    observed: now_ticks,
-                });
-            }
+        if let Some(previous) = self.last_now_ticks
+            && now_ticks < previous
+        {
+            return Err(FrameFragmentError::ClockRegression {
+                previous,
+                observed: now_ticks,
+            });
         }
         self.last_now_ticks = Some(now_ticks);
         Ok(())
@@ -586,8 +581,7 @@ impl FrameReassembler {
             .assemblies
             .iter()
             .filter_map(|(key, assembly)| {
-                (now_ticks.saturating_sub(assembly.created_at_ticks)
-                    >= self.config.max_age_ticks)
+                (now_ticks.saturating_sub(assembly.created_at_ticks) >= self.config.max_age_ticks)
                     .then_some(*key)
             })
             .collect();
@@ -706,9 +700,11 @@ mod tests {
         let payload = b"abcdefgh";
         let digest = frame_digest(payload);
         let mut reassembler = reassembler();
-        assert!(reassembler
-            .push(fragment(30, 0, 2, 8, digest, b"abcd"), 0)
-            .is_ok());
+        assert!(
+            reassembler
+                .push(fragment(30, 0, 2, 8, digest, b"abcd"), 0)
+                .is_ok()
+        );
         assert!(matches!(
             reassembler.push(fragment(30, 1, 2, 8, digest, b"efgh"), 1),
             Ok(FrameFragmentDisposition::Completed(_))
@@ -765,9 +761,11 @@ mod tests {
         let payload = b"abcdefgh";
         let digest = frame_digest(payload);
         let mut reassembler = reassembler();
-        assert!(reassembler
-            .push(fragment(4, 0, 2, 8, digest, b"abcd"), 0)
-            .is_ok());
+        assert!(
+            reassembler
+                .push(fragment(4, 0, 2, 8, digest, b"abcd"), 0)
+                .is_ok()
+        );
         assert_eq!(
             reassembler.push(fragment(4, 0, 2, 8, digest, b"xxxx"), 1),
             Err(FrameFragmentError::ConflictingDuplicate)
@@ -779,9 +777,11 @@ mod tests {
     #[test]
     fn full_frame_digest_mismatch_discards_assembly() {
         let mut reassembler = reassembler();
-        assert!(reassembler
-            .push(fragment(5, 0, 2, 8, [9; 32], b"abcd"), 0)
-            .is_ok());
+        assert!(
+            reassembler
+                .push(fragment(5, 0, 2, 8, [9; 32], b"abcd"), 0)
+                .is_ok()
+        );
         assert_eq!(
             reassembler.push(fragment(5, 1, 2, 8, [9; 32], b"efgh"), 1),
             Err(FrameFragmentError::FrameDigestMismatch)
@@ -794,9 +794,11 @@ mod tests {
         let payload = b"abcdefgh";
         let digest = frame_digest(payload);
         let mut reassembler = reassembler();
-        assert!(reassembler
-            .push(fragment(6, 0, 2, 8, digest, b"abcd"), 0)
-            .is_ok());
+        assert!(
+            reassembler
+                .push(fragment(6, 0, 2, 8, digest, b"abcd"), 0)
+                .is_ok()
+        );
         let mut second = fragment(6, 1, 2, 8, digest, b"efgh");
         second.metadata.width = 1920;
         assert_eq!(
@@ -837,9 +839,11 @@ mod tests {
     fn advancing_key_epoch_discards_incomplete_frames_and_allows_id_reset() {
         let payload = b"abcdefgh";
         let mut reassembler = reassembler();
-        assert!(reassembler
-            .push(fragment(9, 0, 2, 8, frame_digest(payload), b"abcd"), 0)
-            .is_ok());
+        assert!(
+            reassembler
+                .push(fragment(9, 0, 2, 8, frame_digest(payload), b"abcd"), 0)
+                .is_ok()
+        );
         assert_eq!(reassembler.advance_key_epoch(5), Ok(1));
         let mut next = fragment(1, 0, 2, 8, frame_digest(payload), b"abcd");
         next.key.key_epoch = 5;
@@ -867,10 +871,7 @@ mod tests {
         let first = fragment(10, 0, 2, 8, frame_digest(payload), b"abcd");
         assert!(reassembler.push(first, 0).is_ok());
         assert_eq!(
-            reassembler.push(
-                fragment(11, 0, 2, 8, frame_digest(payload), b"abcd"),
-                1
-            ),
+            reassembler.push(fragment(11, 0, 2, 8, frame_digest(payload), b"abcd"), 1),
             Err(FrameFragmentError::FrameCapacityFull)
         );
         assert_eq!(reassembler.snapshot().reserved_bytes, 8);
@@ -902,14 +903,13 @@ mod tests {
         let mut reassembler = FrameReassembler::new([1; 32], 4, config)
             .unwrap_or_else(|error| panic!("config rejected: {error:?}"));
         let payload = b"abcdefgh";
-        assert!(reassembler
-            .push(fragment(20, 0, 2, 8, frame_digest(payload), b"abcd"), 0)
-            .is_ok());
+        assert!(
+            reassembler
+                .push(fragment(20, 0, 2, 8, frame_digest(payload), b"abcd"), 0)
+                .is_ok()
+        );
         assert_eq!(
-            reassembler.push(
-                fragment(21, 0, 2, 8, frame_digest(payload), b"abcd"),
-                1
-            ),
+            reassembler.push(fragment(21, 0, 2, 8, frame_digest(payload), b"abcd"), 1),
             Err(FrameFragmentError::ReassemblyBytesFull)
         );
     }
@@ -928,14 +928,13 @@ mod tests {
         let mut reassembler = FrameReassembler::new([1; 32], 4, config)
             .unwrap_or_else(|error| panic!("config rejected: {error:?}"));
         let payload = b"abcdefgh";
-        assert!(reassembler
-            .push(fragment(22, 0, 2, 8, frame_digest(payload), b"abcd"), 0)
-            .is_ok());
+        assert!(
+            reassembler
+                .push(fragment(22, 0, 2, 8, frame_digest(payload), b"abcd"), 0)
+                .is_ok()
+        );
         assert_eq!(
-            reassembler.push(
-                fragment(23, 0, 1, 4, frame_digest(b"wxyz"), b"wxyz"),
-                1
-            ),
+            reassembler.push(fragment(23, 0, 1, 4, frame_digest(b"wxyz"), b"wxyz"), 1),
             Err(FrameFragmentError::FragmentDescriptorCapacityFull)
         );
     }
@@ -949,9 +948,11 @@ mod tests {
         let mut reassembler = FrameReassembler::new([1; 32], 4, config)
             .unwrap_or_else(|error| panic!("config rejected: {error:?}"));
         let payload = b"abcdefgh";
-        assert!(reassembler
-            .push(fragment(12, 0, 2, 8, frame_digest(payload), b"abcd"), 10)
-            .is_ok());
+        assert!(
+            reassembler
+                .push(fragment(12, 0, 2, 8, frame_digest(payload), b"abcd"), 10)
+                .is_ok()
+        );
         assert_eq!(reassembler.expire(14), Ok(0));
         assert_eq!(reassembler.expire(15), Ok(1));
         assert_eq!(reassembler.snapshot().reserved_bytes, 0);
@@ -1015,10 +1016,7 @@ mod tests {
             .unwrap_or_else(|error| panic!("config rejected: {error:?}"));
         let payload = b"abcdefgh";
         assert_eq!(
-            reassembler.push(
-                fragment(13, 0, 2, 8, frame_digest(payload), b"abcde"),
-                0
-            ),
+            reassembler.push(fragment(13, 0, 2, 8, frame_digest(payload), b"abcde"), 0),
             Err(FrameFragmentError::FragmentTooLarge)
         );
         assert_eq!(reassembler.snapshot().reserved_bytes, 0);
@@ -1029,9 +1027,11 @@ mod tests {
         let payload = b"abcdefgh";
         let mut reassembler = reassembler();
         let digest = frame_digest(payload);
-        assert!(reassembler
-            .push(fragment(14, 0, 2, 8, digest, b"abcd"), 0)
-            .is_ok());
+        assert!(
+            reassembler
+                .push(fragment(14, 0, 2, 8, digest, b"abcd"), 0)
+                .is_ok()
+        );
         assert_eq!(
             reassembler.push(fragment(14, 1, 2, 8, digest, b"efghi"), 1),
             Err(FrameFragmentError::ExceedsDeclaredFrameSize)
@@ -1043,9 +1043,11 @@ mod tests {
     fn abort_frame_releases_reserved_memory() {
         let payload = b"abcdefgh";
         let mut reassembler = reassembler();
-        assert!(reassembler
-            .push(fragment(15, 0, 2, 8, frame_digest(payload), b"abcd"), 0)
-            .is_ok());
+        assert!(
+            reassembler
+                .push(fragment(15, 0, 2, 8, frame_digest(payload), b"abcd"), 0)
+                .is_ok()
+        );
         assert!(reassembler.abort_frame(FragmentFrameKey {
             key_epoch: 4,
             frame_id: 15,
