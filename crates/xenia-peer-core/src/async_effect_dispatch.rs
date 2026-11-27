@@ -415,10 +415,24 @@ pub struct TransportDispatchGate {
 }
 
 impl TransportDispatchGate {
-    /// Create an active gate for one authenticated session and authority epoch.
+    /// Create a new-session gate with an initial operation sequence floor of zero.
+    ///
+    /// Do not use this constructor to resume a prior session. Resumed sessions
+    /// must call restore with the durable operation-sequence high-water mark
+    /// recovered from the operation WAL.
     pub fn new(
         session_fingerprint: [u8; 32],
         authority_epoch: u64,
+    ) -> Result<Self, DispatchGateError> {
+        Self::restore(session_fingerprint, authority_epoch, 0)
+    }
+
+    /// Restore a gate after process restart using the last durably admitted
+    /// operation sequence recovered from the operation WAL.
+    pub fn restore(
+        session_fingerprint: [u8; 32],
+        authority_epoch: u64,
+        last_admitted_sequence: u64,
     ) -> Result<Self, DispatchGateError> {
         let gate_id = NEXT_DISPATCH_GATE_ID
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
@@ -430,7 +444,7 @@ impl TransportDispatchGate {
             inner: Arc::new(Mutex::new(DispatchInner {
                 session_fingerprint,
                 authority_epoch,
-                last_admitted_sequence: None,
+                last_admitted_sequence: Some(last_admitted_sequence),
                 phase: GatePhase::Active,
                 operations: HashMap::new(),
                 recent_reconciliations: HashMap::new(),
