@@ -1099,23 +1099,30 @@ mod tests {
         bundle.sign_with(&signing_key(2), 102)
             .unwrap_or_else(|error| panic!("lease witness two failed: {error:?}"));
         let policy = witness_policy();
-        assert!(verify_sequence_lease_for_use(
-            &bundle, &policy, OperationWalAnchorFreshnessPolicy::default(),
-            150, [7; 32], 4, [10; 32], 9_999,
-        ).is_ok());
+        let verified = verify_sequence_lease_for_use(
+            &bundle,
+            &policy,
+            OperationWalAnchorFreshnessPolicy::default(),
+            150,
+            [7; 32],
+            4,
+            [10; 32],
+        ).unwrap_or_else(|error| panic!("lease verification failed: {error:?}"));
+        assert!(verified.contains(9_999));
+        assert!(!verified.contains(10_001));
+        assert_eq!(verified.first_operation_sequence(), 1);
+        assert_eq!(verified.last_operation_sequence(), 10_000);
         assert_eq!(
             verify_sequence_lease_for_use(
-                &bundle, &policy, OperationWalAnchorFreshnessPolicy::default(),
-                150, [7; 32], 4, [99; 32], 9_999,
-            ),
-            Err(OperationWalAnchorError::BootFingerprintMismatch)
-        );
-        assert_eq!(
-            verify_sequence_lease_for_use(
-                &bundle, &policy, OperationWalAnchorFreshnessPolicy::default(),
-                150, [7; 32], 4, [10; 32], 10_001,
-            ),
-            Err(OperationWalAnchorError::OperationSequenceOutsideLease)
+                &bundle,
+                &policy,
+                OperationWalAnchorFreshnessPolicy::default(),
+                150,
+                [7; 32],
+                4,
+                [99; 32],
+            ).err(),
+            Some(OperationWalAnchorError::BootFingerprintMismatch)
         );
     }
 
