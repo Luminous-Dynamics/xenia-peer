@@ -1190,6 +1190,20 @@ mod tests {
     }
 
     #[test]
+    fn restore_uses_durable_operation_sequence_high_water() {
+        let gate = TransportDispatchGate::restore([1; 32], 7, 42)
+            .unwrap_or_else(|error| panic!("restore failed: {error:?}"));
+        assert_eq!(
+            gate.prepare_after_admission(request(42)).err(),
+            Some(DispatchGateError::NonMonotonicOperationSequence {
+                previous: 42,
+                observed: 42,
+            })
+        );
+        assert!(gate.prepare_after_admission(request(43)).is_ok());
+    }
+
+    #[test]
     fn revoke_and_begin_dispatch_have_one_linearization_winner() {
         use std::sync::Barrier;
         use std::thread;
