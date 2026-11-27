@@ -310,21 +310,19 @@ impl OperationEvidenceLedger {
         let context_digest = context.digest();
 
         if let Some(existing) = self.records.get(&operation_id).copied() {
-            if existing.operation_sequence == operation_sequence
-                && existing.context == context
-            {
+            if existing.operation_sequence == operation_sequence && existing.context == context {
                 return Ok(AdmissionResult::AlreadyPresent(existing));
             }
             return Err(OperationEvidenceError::OperationIdConflict);
         }
 
-        if let Some(previous) = self.last_operation_sequence {
-            if operation_sequence <= previous {
-                return Err(OperationEvidenceError::NonMonotonicOperationSequence {
-                    previous,
-                    observed: operation_sequence,
-                });
-            }
+        if let Some(previous) = self.last_operation_sequence
+            && operation_sequence <= previous
+        {
+            return Err(OperationEvidenceError::NonMonotonicOperationSequence {
+                previous,
+                observed: operation_sequence,
+            });
         }
         if self.records.len() >= MAX_OPERATION_RECORDS {
             return Err(OperationEvidenceError::CapacityFull);
@@ -400,10 +398,9 @@ impl OperationEvidenceLedger {
     ) -> Result<OperationSnapshot, OperationEvidenceError> {
         let current = self.snapshot(operation_id)?;
         let (next, allowed) = match current.state {
-            OperationState::Committed => (
-                OperationState::Observed,
-                &[OperationState::Committed][..],
-            ),
+            OperationState::Committed => {
+                (OperationState::Observed, &[OperationState::Committed][..])
+            }
             OperationState::ReconciledCommitted => (
                 OperationState::ReconciledObserved,
                 &[OperationState::ReconciledCommitted][..],
@@ -505,9 +502,7 @@ impl OperationEvidenceLedger {
                 ReconciliationOutcome::Committed => OperationState::ReconciledCommitted,
                 ReconciliationOutcome::Observed => OperationState::ReconciledObserved,
             };
-            if current.state == expected
-                && current.reconciliation_digest == Some(receipt_digest)
-            {
+            if current.state == expected && current.reconciliation_digest == Some(receipt_digest) {
                 return Ok(current);
             }
             if matches!(
@@ -581,17 +576,7 @@ impl OperationEvidenceLedger {
                 return false;
             }
 
-            let expected_hash = event_hash(
-                previous_hash,
-                event.event_sequence,
-                event.operation_id,
-                event.operation_sequence,
-                event.context_digest,
-                event.kind,
-                event.clock_domain,
-                event.at_ticks,
-                event.evidence_digest,
-            );
+            let expected_hash = event_hash(event);
             if expected_hash != event.event_hash {
                 return false;
             }
@@ -654,13 +639,13 @@ impl OperationEvidenceLedger {
         if self.events.len() >= MAX_OPERATION_EVENTS {
             return Err(OperationEvidenceError::CapacityFull);
         }
-        if let Some(previous) = self.last_event_tick {
-            if at_ticks < previous {
-                return Err(OperationEvidenceError::ClockRegression {
-                    previous,
-                    observed: at_ticks,
-                });
-            }
+        if let Some(previous) = self.last_event_tick
+            && at_ticks < previous
+        {
+            return Err(OperationEvidenceError::ClockRegression {
+                previous,
+                observed: at_ticks,
+            });
         }
 
         let event_sequence = self.next_event_sequence;
@@ -668,19 +653,7 @@ impl OperationEvidenceLedger {
             .checked_add(1)
             .ok_or(OperationEvidenceError::EventSequenceExhausted)?;
         let previous_hash = self.last_event_hash;
-        let event_hash = event_hash(
-            previous_hash,
-            event_sequence,
-            operation_id,
-            operation_sequence,
-            context_digest,
-            kind,
-            self.clock_domain,
-            at_ticks,
-            evidence_digest,
-        );
-
-        self.events.push(OperationEvidenceEvent {
+        let mut event = OperationEvidenceEvent {
             event_sequence,
             operation_id,
             operation_sequence,
@@ -690,8 +663,11 @@ impl OperationEvidenceLedger {
             at_ticks,
             evidence_digest,
             previous_hash,
-            event_hash,
-        });
+            event_hash: [0; 32],
+        };
+        let event_hash = event_hash(&event);
+        event.event_hash = event_hash;
+        self.events.push(event);
         self.next_event_sequence = next_event_sequence;
         self.last_event_tick = Some(at_ticks);
         self.last_event_hash = event_hash;
@@ -699,28 +675,18 @@ impl OperationEvidenceLedger {
     }
 }
 
-fn event_hash(
-    previous_hash: [u8; 32],
-    event_sequence: u64,
-    operation_id: OperationId,
-    operation_sequence: u64,
-    context_digest: [u8; 32],
-    kind: OperationEventKind,
-    clock_domain: u64,
-    at_ticks: u64,
-    evidence_digest: [u8; 32],
-) -> [u8; 32] {
+fn event_hash(event: &OperationEvidenceEvent) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"XENIA-OPERATION-EVENT-V1\0");
-    hasher.update(&previous_hash);
-    hasher.update(&event_sequence.to_le_bytes());
-    hasher.update(&operation_id.0);
-    hasher.update(&operation_sequence.to_le_bytes());
-    hasher.update(&context_digest);
-    hasher.update(&[kind as u8]);
-    hasher.update(&clock_domain.to_le_bytes());
-    hasher.update(&at_ticks.to_le_bytes());
-    hasher.update(&evidence_digest);
+    hasher.update(&event.previous_hash);
+    hasher.update(&event.event_sequence.to_le_bytes());
+    hasher.update(&event.operation_id.0);
+    hasher.update(&event.operation_sequence.to_le_bytes());
+    hasher.update(&event.context_digest);
+    hasher.update(&[event.kind as u8]);
+    hasher.update(&event.clock_domain.to_le_bytes());
+    hasher.update(&event.at_ticks.to_le_bytes());
+    hasher.update(&event.evidence_digest);
     *hasher.finalize().as_bytes()
 }
 
