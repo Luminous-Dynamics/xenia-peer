@@ -28,16 +28,16 @@ The async dispatch gate makes that contract explicit without keeping a lock acro
 5. CancelledBeforeDispatch: a prepared permit was dropped or invalidated before dispatch.
 6. Reconciled: an external verifier has authenticated a receipt resolving the exact UNKNOWN operation.
 
-Operation IDs are deterministically derived from session fingerprint, authority epoch, permission lane, direction, monotonic per-session operation sequence, and context digest. The sequence never resets across rekey/regrant, so a completed operation cannot be replayed by presenting an old sequence.
+Operation IDs are deterministically derived using BLAKE3-128 over the session fingerprint, authority epoch, permission lane, direction, monotonic per-session operation sequence, and context digest. The sequence never resets across rekey/regrant or process restart; its high-water mark must be recovered from durable evidence before the gate accepts new work. A completed operation cannot be replayed by presenting an old sequence.
 
-The active map retains only prepared, in-flight and UNKNOWN operations. Accepted/cancelled operations are retired from that map; the 4,096 limit is an outstanding-operation bound, not a lifetime-operation bound. A bounded 1,024-entry reconciliation cache provides recent in-memory idempotency; the durable WAL is the long-term source of truth.
+The active map retains only prepared, in-flight and UNKNOWN operations. Accepted/cancelled operations are retired from that map; the 4,096 limit is an outstanding-operation bound, not a lifetime-operation bound. A bounded 1,024-entry reconciliation cache provides recent in-memory idempotency; the durable WAL is the long-term source of truth. Long-term duplicate prevention after restart is therefore a joint invariant of the gate plus recovered WAL sequence high-water mark, not of this in-memory gate alone.
 
 ## Adapter sequence for live Xenia senders
 
 The intended adapter sequence for a host-to-viewer frame, audio, telemetry, clipboard disclosure, or file chunk is:
 
 1. Independently check the exact M1 permission, current authority/rekey epoch, scope, freshness, and payload/resource policy.
-2. Derive a stable operation ID from the protocol identity where possible: authenticated session fingerprint + authority epoch + lane + protocol frame/sequence/transfer identity. Do not use an ephemeral random ID without a durable mapping.
+2. Allocate a strictly increasing per-session operation sequence. Persist its high-water mark in the durable operation WAL and never reset it across process restart, rekey, or regrant. Derive the stable operation ID as BLAKE3-128 over the domain tag, authenticated session fingerprint, authority epoch, lane, direction, sequence, and privacy-preserving context digest. A protocol frame/transfer sequence can seed or map into this global monotonic sequence, but the mapping must remain stable across reconnect.
 3. Call prepare_after_admission.
 4. Append and durably sync the stage-accurate AuthorizationAdmitted and EffectAttempted WAL records before any transport dispatch.
 5. Call begin_dispatch immediately before invoking the concrete transport future. If revoke won first, record a definitive NotDispatched terminal event; if begin_dispatch won first, the operation is logically admitted before revoke.
