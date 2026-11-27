@@ -549,10 +549,7 @@ impl EffectCommitGate {
 
     /// Advance the locally observed authority epoch without changing active
     /// status. This invalidates outstanding permits from the prior epoch.
-    pub fn advance_authority_epoch(
-        &self,
-        new_epoch: u64,
-    ) -> Result<u64, EffectGateError> {
+    pub fn advance_authority_epoch(&self, new_epoch: u64) -> Result<u64, EffectGateError> {
         let mut inner = self.lock()?;
         if !matches!(inner.phase, GatePhase::Active) {
             return Err(EffectGateError::Revoked);
@@ -963,12 +960,8 @@ mod tests {
             .unwrap_or_else(|error| panic!("reconciliation failed: {error:?}"));
         assert_eq!(reconciled.original_unknown_digest, [13; 32]);
         assert_eq!(
-            gate.reconcile_unknown(
-                [7; 16],
-                EffectReconciliationOutcome::NotCommitted,
-                [14; 32],
-            )
-            .unwrap_or_else(|error| panic!("idempotent receipt failed: {error:?}")),
+            gate.reconcile_unknown([7; 16], EffectReconciliationOutcome::NotCommitted, [14; 32],)
+                .unwrap_or_else(|error| panic!("idempotent receipt failed: {error:?}")),
             reconciled
         );
         let next = gate
