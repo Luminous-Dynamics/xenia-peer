@@ -1084,6 +1084,38 @@ mod tests {
     }
 
     #[test]
+    fn completed_operation_sequence_cannot_be_replayed() {
+        let gate = gate();
+        let request = request(12);
+        gate.begin_dispatch(
+            gate.prepare_after_admission(request)
+                .unwrap_or_else(|error| panic!("prepare failed: {error:?}")),
+        )
+        .unwrap_or_else(|error| panic!("dispatch admission failed: {error:?}"))
+        .accepted_by_transport([12; 32])
+        .unwrap_or_else(|error| panic!("completion failed: {error:?}"));
+
+        assert_eq!(
+            gate.prepare_after_admission(request).err(),
+            Some(DispatchGateError::NonMonotonicOperationSequence {
+                previous: 12,
+                observed: 12,
+            })
+        );
+    }
+
+    #[test]
+    fn operation_identity_binds_sequence_epoch_lane_and_context() {
+        let gate = gate();
+        let mut forged = request(13);
+        forged.context_digest = [250; 32];
+        assert_eq!(
+            gate.prepare_after_admission(forged).err(),
+            Some(DispatchGateError::OperationIdentityMismatch)
+        );
+    }
+
+    #[test]
     fn revoke_and_begin_dispatch_have_one_linearization_winner() {
         use std::sync::Barrier;
         use std::thread;
