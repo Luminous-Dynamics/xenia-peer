@@ -85,6 +85,12 @@ Primary references:
 - PostgreSQL WAL configuration: https://www.postgresql.org/docs/18/runtime-config-wal.html
 - Kafka design: https://kafka.apache.org/design/
 
+## Deterministic reference-store qualification
+
+The module's unit tests include a test-only in-memory witness store. It holds the checkpoint/lease state behind a mutex and performs expected-head comparison, extension/successor verification, signing, and state replacement under one critical section. This is a deterministic reference implementation of the compare-and-advance semantics, not an independent witness: its process memory can be lost or rolled back with the test process and is not a security boundary.
+
+The tests cover a successful checkpoint sequence with readback, rejection of a broken extension without advancing state, two concurrent contenders using the same prior checkpoint where exactly one wins, and monotonic lease reservation with a readback path for a simulated lost response. The real deployment must repeat these tests against a durable store in a separate failure domain and test failures before commit, after commit, quorum partition, restart and storage rollback.
+
 ## Benchmark programme
 
 See benchmarks/operation-wal-anchor-v0.1.json. Status is preregistered_unmeasured.
