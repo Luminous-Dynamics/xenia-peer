@@ -1170,6 +1170,19 @@ mod tests {
         .unwrap_or_else(|error| panic!("checkpoint construction failed: {error:?}"))
     }
 
+    fn merkle_extension(
+        record_hashes: &[[u8; 32]],
+        old_tree_size: u64,
+    ) -> OperationWalCheckpointExtension {
+        OperationWalCheckpointExtension::MerkleConsistency(
+            crate::operation_wal_merkle::generate_operation_wal_consistency_proof(
+                record_hashes,
+                old_tree_size,
+            )
+            .unwrap_or_else(|error| panic!("Merkle proof generation failed: {error:?}")),
+        )
+    }
+
     fn witnessed_checkpoint(checkpoint: OperationWalCheckpoint) -> OperationWalWitnessBundle {
         let mut bundle = OperationWalWitnessBundle::new(checkpoint)
             .unwrap_or_else(|error| panic!("bundle creation failed: {error:?}"));
@@ -1453,44 +1466,14 @@ mod tests {
     fn witness_store_atomically_advances_checkpoint_and_supports_readback() {
         let store = MemoryWitnessStore::new();
         let first = checkpoint(None, 2, [2; 32], 100);
-        let first_extension = OperationWalHeadExtension {
-            base_sequence: 0,
-            base_head_hash: [0; 32],
-            records: vec![
-                OperationWalHeadRecord {
-                    sequence: 1,
-                    previous_hash: [0; 32],
-                    record_hash: [1; 32],
-                },
-                OperationWalHeadRecord {
-                    sequence: 2,
-                    previous_hash: [1; 32],
-                    record_hash: [2; 32],
-                },
-            ],
-        };
+        let first_extension = merkle_extension(&[[1; 32], [2; 32]], 0);
         let first_bundle = store
             .compare_and_advance_checkpoint(None, first, first_extension)
             .unwrap_or_else(|error| panic!("first checkpoint advance failed: {error:?}"));
         assert!(verify_checkpoint_witness_quorum(&first_bundle, &witness_policy()).is_ok());
 
         let second = checkpoint(Some(&first_bundle.checkpoint), 4, [4; 32], 101);
-        let second_extension = OperationWalHeadExtension {
-            base_sequence: 2,
-            base_head_hash: [2; 32],
-            records: vec![
-                OperationWalHeadRecord {
-                    sequence: 3,
-                    previous_hash: [2; 32],
-                    record_hash: [3; 32],
-                },
-                OperationWalHeadRecord {
-                    sequence: 4,
-                    previous_hash: [3; 32],
-                    record_hash: [4; 32],
-                },
-            ],
-        };
+        let second_extension = merkle_extension(&[[1; 32], [2; 32], [3; 32], [4; 32]], 2);
         let expected = operation_wal_checkpoint_fingerprint(&first_bundle.checkpoint)
             .unwrap_or_else(|error| panic!("checkpoint fingerprint failed: {error:?}"));
         let second_bundle = store
@@ -1510,22 +1493,10 @@ mod tests {
     fn witness_store_rejects_broken_extension_without_mutating_head() {
         let store = MemoryWitnessStore::new();
         let candidate = checkpoint(None, 2, [2; 32], 100);
-        let broken = OperationWalHeadExtension {
-            base_sequence: 0,
-            base_head_hash: [0; 32],
-            records: vec![
-                OperationWalHeadRecord {
-                    sequence: 1,
-                    previous_hash: [0; 32],
-                    record_hash: [1; 32],
-                },
-                OperationWalHeadRecord {
-                    sequence: 2,
-                    previous_hash: [88; 32],
-                    record_hash: [2; 32],
-                },
-            ],
-        };
+        let mut broken = merkle_extension(&[[1; 32], [2; 32]], 0);
+        if let OperationWalCheckpointExtension::MerkleConsistency(proof) = &mut broken {
+            proof.nodes[0][0] ^= 1;
+        }
         assert_eq!(
             store.compare_and_advance_checkpoint(None, candidate, broken),
             Err(OperationWalWitnessStoreError::CandidateRejected)
@@ -1545,22 +1516,7 @@ mod tests {
 
         let store = Arc::new(MemoryWitnessStore::new());
         let candidate = checkpoint(None, 2, [2; 32], 100);
-        let extension = OperationWalHeadExtension {
-            base_sequence: 0,
-            base_head_hash: [0; 32],
-            records: vec![
-                OperationWalHeadRecord {
-                    sequence: 1,
-                    previous_hash: [0; 32],
-                    record_hash: [1; 32],
-                },
-                OperationWalHeadRecord {
-                    sequence: 2,
-                    previous_hash: [1; 32],
-                    record_hash: [2; 32],
-                },
-            ],
-        };
+        let extension = merkle_extension(&[[1; 32], [2; 32]], 0);
         let barrier = Arc::new(Barrier::new(3));
         let mut workers = Vec::new();
         for _ in 0..2 {
