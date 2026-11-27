@@ -159,7 +159,14 @@ impl OperationWalHeadExtension {
                 verify_checkpoint_successor(previous, candidate)?;
                 (previous.wal_sequence, previous.wal_head_hash)
             }
-            None => (0, [0; 32]),
+            None => {
+                if candidate.witness_sequence != 1
+                    || candidate.previous_checkpoint_fingerprint != [0; 32]
+                {
+                    return Err(OperationWalAnchorError::PreviousCheckpointMismatch);
+                }
+                (0, [0; 32])
+            }
         };
         if self.base_sequence != base_sequence || self.base_head_hash != base_head_hash {
             return Err(OperationWalAnchorError::ExtensionBaseMismatch);
