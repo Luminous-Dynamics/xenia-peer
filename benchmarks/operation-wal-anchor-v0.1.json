@@ -11,7 +11,8 @@
     "independent_durable_witness_service": "not_implemented",
     "live_operation_wal_integration": "not_implemented",
     "crash_restart_qualification": "not_implemented",
-    "measured_results": false
+    "measured_results": false,
+    "test_only_in_memory_cas_store": "implemented_in_branch"
   },
   "hard_invariants": {
     "witness_store_compare_and_advance_is_atomic": true,
@@ -32,37 +33,200 @@
     "unknown_witness_store_outcome_requires_readback_before_retry": true
   },
   "fault_scenarios": [
-    {"id":"OWA-001","name":"restore-local-wal-older-than-witness","expected":"LocalWalRollback","safety_assertion":"no_new_effect_admitted"},
-    {"id":"OWA-002","name":"restore-local-wal-same-sequence-different-hash","expected":"LocalWalHeadMismatch","safety_assertion":"no_new_effect_admitted"},
-    {"id":"OWA-003","name":"restore-local-wal-newer-than-witness","expected":"UnanchoredWalSuffix","safety_assertion":"suffix_must_be_witnessed_before_mutation"},
-    {"id":"OWA-004","name":"checkpoint-candidate-wrong-parent","expected":"PreviousCheckpointMismatch","safety_assertion":"no_fork_accepted"},
-    {"id":"OWA-005","name":"checkpoint-same-height-different-head","expected":"WalFork","safety_assertion":"no_fork_accepted"},
-    {"id":"OWA-006","name":"checkpoint-wal-sequence-regression","expected":"WalSequenceRegressed","safety_assertion":"no_rollback_accepted"},
-    {"id":"OWA-007","name":"checkpoint-extension-broken-link","expected":"ExtensionBrokenLink","safety_assertion":"no_invalid_suffix_accepted"},
-    {"id":"OWA-008","name":"checkpoint-extension-terminal-head-mismatch","expected":"ExtensionHeadMismatch","safety_assertion":"no_invalid_suffix_accepted"},
-    {"id":"OWA-009","name":"witness-quorum-one-of-three","expected":"QuorumNotMet","safety_assertion":"single_witness_cannot_authorize"},
-    {"id":"OWA-010","name":"untrusted-witness-added-to-bundle","expected":"UntrustedWitness","safety_assertion":"unknown_key_cannot_count_toward_quorum"},
-    {"id":"OWA-011","name":"duplicate-witness-key","expected":"DuplicateWitness","safety_assertion":"one_key_counts_once"},
-    {"id":"OWA-012","name":"invalid-witness-signature","expected":"BadWitnessSignature","safety_assertion":"tampered_checkpoint_rejected"},
-    {"id":"OWA-013","name":"stale-expected-head-cas-race","expected":"StaleExpectedHead","safety_assertion":"one_compare_and_advance_wins"},
-    {"id":"OWA-014","name":"witness-service-unknown-outcome","expected":"ReadBackBeforeRetry","safety_assertion":"no_new_range_or_checkpoint_before_reconciliation"},
-    {"id":"OWA-015","name":"witness-store-state-rollback","expected":"IndependentMonotonicStoreAlarm","safety_assertion":"old_witness_generation_not_accepted"},
-    {"id":"OWA-016","name":"restart-with-unused-sequence-lease","expected":"BurnRemainingOldRange","safety_assertion":"new_lease_starts_after_old_range_end"},
-    {"id":"OWA-017","name":"lease-reused-after-restart","expected":"LeaseRangeReuse","safety_assertion":"no_duplicate_sequence"},
-    {"id":"OWA-018","name":"wrong-process-boot-fingerprint","expected":"BootFingerprintMismatch","safety_assertion":"old_process_lease_cannot_resume"},
-    {"id":"OWA-019","name":"wrong-authority-epoch","expected":"AuthorityEpochMismatch","safety_assertion":"stale_authority_cannot_send"},
-    {"id":"OWA-020","name":"expired-sequence-lease","expected":"LeaseExpired","safety_assertion":"expired_range_cannot_send"},
-    {"id":"OWA-021","name":"operation-outside-lease-range","expected":"OperationSequenceOutsideLease","safety_assertion":"out_of_range_sequence_rejected"},
-    {"id":"OWA-022","name":"restart-with-local-sequence-below-reserved-high-water","expected":"NextLeaseStartsAfterPriorEnd","safety_assertion":"unused_sequences_are_never_reissued"},
-    {"id":"OWA-023","name":"two-processes-race-to-reserve-leases","expected":"AtomicNonOverlappingRanges","safety_assertion":"no_overlap_even_under_concurrent_issue"},
-    {"id":"OWA-024","name":"unavailable-witness-store","expected":"FailClosed","safety_assertion":"no_unwitnessed_high_water_advance"}
+    {
+      "id": "OWA-001",
+      "name": "restore-local-wal-older-than-witness",
+      "expected": "LocalWalRollback",
+      "safety_assertion": "no_new_effect_admitted"
+    },
+    {
+      "id": "OWA-002",
+      "name": "restore-local-wal-same-sequence-different-hash",
+      "expected": "LocalWalHeadMismatch",
+      "safety_assertion": "no_new_effect_admitted"
+    },
+    {
+      "id": "OWA-003",
+      "name": "restore-local-wal-newer-than-witness",
+      "expected": "UnanchoredWalSuffix",
+      "safety_assertion": "suffix_must_be_witnessed_before_mutation"
+    },
+    {
+      "id": "OWA-004",
+      "name": "checkpoint-candidate-wrong-parent",
+      "expected": "PreviousCheckpointMismatch",
+      "safety_assertion": "no_fork_accepted"
+    },
+    {
+      "id": "OWA-005",
+      "name": "checkpoint-same-height-different-head",
+      "expected": "WalFork",
+      "safety_assertion": "no_fork_accepted"
+    },
+    {
+      "id": "OWA-006",
+      "name": "checkpoint-wal-sequence-regression",
+      "expected": "WalSequenceRegressed",
+      "safety_assertion": "no_rollback_accepted"
+    },
+    {
+      "id": "OWA-007",
+      "name": "checkpoint-extension-broken-link",
+      "expected": "ExtensionBrokenLink",
+      "safety_assertion": "no_invalid_suffix_accepted"
+    },
+    {
+      "id": "OWA-008",
+      "name": "checkpoint-extension-terminal-head-mismatch",
+      "expected": "ExtensionHeadMismatch",
+      "safety_assertion": "no_invalid_suffix_accepted"
+    },
+    {
+      "id": "OWA-009",
+      "name": "witness-quorum-one-of-three",
+      "expected": "QuorumNotMet",
+      "safety_assertion": "single_witness_cannot_authorize"
+    },
+    {
+      "id": "OWA-010",
+      "name": "untrusted-witness-added-to-bundle",
+      "expected": "UntrustedWitness",
+      "safety_assertion": "unknown_key_cannot_count_toward_quorum"
+    },
+    {
+      "id": "OWA-011",
+      "name": "duplicate-witness-key",
+      "expected": "DuplicateWitness",
+      "safety_assertion": "one_key_counts_once"
+    },
+    {
+      "id": "OWA-012",
+      "name": "invalid-witness-signature",
+      "expected": "BadWitnessSignature",
+      "safety_assertion": "tampered_checkpoint_rejected"
+    },
+    {
+      "id": "OWA-013",
+      "name": "stale-expected-head-cas-race",
+      "expected": "StaleExpectedHead",
+      "safety_assertion": "one_compare_and_advance_wins"
+    },
+    {
+      "id": "OWA-014",
+      "name": "witness-service-unknown-outcome",
+      "expected": "ReadBackBeforeRetry",
+      "safety_assertion": "no_new_range_or_checkpoint_before_reconciliation"
+    },
+    {
+      "id": "OWA-015",
+      "name": "witness-store-state-rollback",
+      "expected": "IndependentMonotonicStoreAlarm",
+      "safety_assertion": "old_witness_generation_not_accepted"
+    },
+    {
+      "id": "OWA-016",
+      "name": "restart-with-unused-sequence-lease",
+      "expected": "BurnRemainingOldRange",
+      "safety_assertion": "new_lease_starts_after_old_range_end"
+    },
+    {
+      "id": "OWA-017",
+      "name": "lease-reused-after-restart",
+      "expected": "LeaseRangeReuse",
+      "safety_assertion": "no_duplicate_sequence"
+    },
+    {
+      "id": "OWA-018",
+      "name": "wrong-process-boot-fingerprint",
+      "expected": "BootFingerprintMismatch",
+      "safety_assertion": "old_process_lease_cannot_resume"
+    },
+    {
+      "id": "OWA-019",
+      "name": "wrong-authority-epoch",
+      "expected": "AuthorityEpochMismatch",
+      "safety_assertion": "stale_authority_cannot_send"
+    },
+    {
+      "id": "OWA-020",
+      "name": "expired-sequence-lease",
+      "expected": "LeaseExpired",
+      "safety_assertion": "expired_range_cannot_send"
+    },
+    {
+      "id": "OWA-021",
+      "name": "operation-outside-lease-range",
+      "expected": "OperationSequenceOutsideLease",
+      "safety_assertion": "out_of_range_sequence_rejected"
+    },
+    {
+      "id": "OWA-022",
+      "name": "restart-with-local-sequence-below-reserved-high-water",
+      "expected": "NextLeaseStartsAfterPriorEnd",
+      "safety_assertion": "unused_sequences_are_never_reissued"
+    },
+    {
+      "id": "OWA-023",
+      "name": "two-processes-race-to-reserve-leases",
+      "expected": "AtomicNonOverlappingRanges",
+      "safety_assertion": "no_overlap_even_under_concurrent_issue"
+    },
+    {
+      "id": "OWA-024",
+      "name": "unavailable-witness-store",
+      "expected": "FailClosed",
+      "safety_assertion": "no_unwitnessed_high_water_advance"
+    },
+    {
+      "id": "OWA-025",
+      "name": "in-memory-reference-store-competing-checkpoint-cas",
+      "expected": "ExactlyOneWinner",
+      "safety_assertion": "stale_expected_head_is_rejected"
+    },
+    {
+      "id": "OWA-026",
+      "name": "invalid-extension-at-witness-store",
+      "expected": "CandidateRejected",
+      "safety_assertion": "retained_checkpoint_unchanged"
+    },
+    {
+      "id": "OWA-027",
+      "name": "lease-commit-response-lost",
+      "expected": "ReadBackFindsCommittedRange",
+      "safety_assertion": "caller_does_not_reserve_a_different_overlapping_range"
+    }
   ],
   "benchmark_matrix": {
-    "witness_quorums": ["2-of-3", "3-of-5"],
-    "lease_spans": [1024, 16384, 262144, 1048576],
-    "concurrency_levels": [1, 8, 32, 128, 512],
-    "operation_counts": [10000, 1000000, 10000000, 100000000],
-    "workloads": ["frame-60fps", "audio-50fps", "telemetry-10hz", "file-chunk-stream", "mixed-lanes"],
+    "witness_quorums": [
+      "2-of-3",
+      "3-of-5"
+    ],
+    "lease_spans": [
+      1024,
+      16384,
+      262144,
+      1048576
+    ],
+    "concurrency_levels": [
+      1,
+      8,
+      32,
+      128,
+      512
+    ],
+    "operation_counts": [
+      10000,
+      1000000,
+      10000000,
+      100000000
+    ],
+    "workloads": [
+      "frame-60fps",
+      "audio-50fps",
+      "telemetry-10hz",
+      "file-chunk-stream",
+      "mixed-lanes"
+    ],
     "baselines": [
       "local-hash-chain-only-no-external-anchor",
       "per-operation-remote-witness-roundtrip",
