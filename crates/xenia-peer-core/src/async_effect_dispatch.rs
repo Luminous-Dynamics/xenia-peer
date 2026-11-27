@@ -1304,7 +1304,7 @@ mod tests {
 
             let finish_state = Arc::clone(&state);
             let finish = thread::spawn(move || {
-                let mut state = finish_state.lock().expect("model lock poisoned");
+                let mut state = finish_state.lock().unwrap_or_else(|_| panic!("model lock poisoned"));
                 if state.in_flight {
                     state.in_flight = false;
                     state.accepted = true;
@@ -1313,7 +1313,7 @@ mod tests {
 
             let revoke_state = Arc::clone(&state);
             let revoke = thread::spawn(move || {
-                let mut state = revoke_state.lock().expect("model lock poisoned");
+                let mut state = revoke_state.lock().unwrap_or_else(|_| panic!("model lock poisoned"));
                 state.active = false;
                 if state.prepared {
                     state.prepared = false;
@@ -1334,7 +1334,7 @@ mod tests {
                 .join()
                 .unwrap_or_else(|_| panic!("model revoke thread panicked"));
 
-            let state = state.lock().expect("model lock poisoned");
+            let state = state.lock().unwrap_or_else(|_| panic!("model lock poisoned"));
             assert!(!state.in_flight);
             if dispatch_admitted {
                 assert!(
