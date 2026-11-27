@@ -1522,6 +1522,55 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_sequence_lease_reservations_have_one_winner() {
+        use std::sync::{Arc, Barrier};
+        use std::thread;
+
+        let store = Arc::new(MemoryWitnessStore::new());
+        let candidate = OperationSequenceLease::next(
+            None,
+            [7; 32],
+            4,
+            [10; 32],
+            100,
+            100,
+            200,
+        ).unwrap_or_else(|error| panic!("lease proposal failed: {error:?}"));
+        let barrier = Arc::new(Barrier::new(3));
+        let mut workers = Vec::new();
+        for _ in 0..2 {
+            let worker_store = Arc::clone(&store);
+            let worker_barrier = Arc::clone(&barrier);
+            let worker_candidate = candidate.clone();
+            workers.push(thread::spawn(move || {
+                worker_barrier.wait();
+                worker_store.compare_and_advance_sequence_lease(None, worker_candidate)
+            }));
+        }
+        barrier.wait();
+        let results: Vec<_> = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap_or_else(|_| panic!("lease worker panicked")))
+            .collect();
+        let successes = results.iter().filter(|result| result.is_ok()).count();
+        let stale = results
+            .iter()
+            .filter(|result| {
+                result.as_ref().err() == Some(&OperationWalWitnessStoreError::StaleExpectedHead)
+            })
+            .count();
+        assert_eq!(successes, 1);
+        assert_eq!(stale, 1);
+
+        let retained = store
+            .latest_sequence_lease([7; 32])
+            .unwrap_or_else(|error| panic!("lease readback failed: {error:?}"))
+            .unwrap_or_else(|| panic!("reserved lease missing"));
+        assert_eq!(retained.lease.first_operation_sequence, 1);
+        assert_eq!(retained.lease.last_operation_sequence, 100);
+    }
+
+    #[test]
     fn invalid_lease_ranges_and_freshness_fail_closed() {
         assert_eq!(
             OperationSequenceLease::next(None, [7; 32], 1, [1; 32], 0, 10, 20),
