@@ -533,7 +533,12 @@ pub enum OperationWalAnchorError {
     ExtensionBaseMismatch,
     /// Extension record count does not match sequence gap.
     #[error("operation-WAL extension length mismatch")]
-    ExtensionLengthMismatch { expected: u64, observed: usize },
+    ExtensionLengthMismatch {
+        /// Number of records required by the WAL sequence gap.
+        expected: u64,
+        /// Number of records present in the supplied extension.
+        observed: usize,
+    },
     /// Extension record sequence is out of order.
     #[error("operation-WAL extension sequence mismatch")]
     ExtensionSequenceMismatch {
@@ -598,7 +603,12 @@ pub enum OperationWalAnchorError {
     WitnessPredatesStatement,
     /// Witness set does not meet quorum.
     #[error("operation-WAL witness quorum not met")]
-    QuorumNotMet { verified: usize, required: usize },
+    QuorumNotMet {
+        /// Number of distinct valid signatures from trusted keys.
+        verified: usize,
+        /// Minimum trusted witness quorum required by policy.
+        required: usize,
+    },
     /// More than the explicit witness limit was supplied.
     #[error("too many operation-WAL witnesses")]
     TooManyWitnesses,
@@ -1195,4 +1205,21 @@ mod tests {
             Err(OperationWalAnchorError::AnchorFromFuture)
         );
     }
+    #[test]
+    fn verified_sequence_lease_expires_on_monotonic_deadline() {
+        let lease = OperationSequenceLease::next(
+            None, [7; 32], 4, [10; 32], 100, 100, 200,
+        )
+        .unwrap_or_else(|error| panic!("lease failed: {error:?}"));
+        let expired = VerifiedOperationSequenceLease {
+            lease,
+            monotonic_expiry: Instant::now() - Duration::from_secs(1),
+        };
+        assert!(!expired.contains(1));
+        assert_eq!(
+            expired.validate_sequence(1),
+            Err(OperationWalAnchorError::OperationSequenceOutsideLease)
+        );
+    }
+
 }
