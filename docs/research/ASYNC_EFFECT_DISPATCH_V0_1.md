@@ -32,6 +32,18 @@ Operation IDs are deterministically derived using BLAKE3-128 over the session fi
 
 The active map retains only prepared, in-flight and UNKNOWN operations. Accepted/cancelled operations are retired from that map; the 4,096 limit is an outstanding-operation bound, not a lifetime-operation bound. A bounded 1,024-entry reconciliation cache provides recent in-memory idempotency; the durable WAL is the long-term source of truth. Long-term duplicate prevention after restart is therefore a joint invariant of the gate plus recovered WAL sequence high-water mark, not of this in-memory gate alone.
 
+## Concurrency and adversarial qualification
+
+The current code contains a Loom exhaustive model of the reduced three-thread interleaving between dispatch admission, transport completion, and revoke. It checks the single-winner ordering contract across the model's explored schedules. This model is deliberately small and is not a proof of the full production implementation or of network behavior. The ordinary threaded test exercises the production gate implementation; Loom exercises the reduced transition model.
+
+The larger qualification should use three distinct layers:
+
+1. **Loom** for exhaustive small-state synchronization models and minimal counterexamples.
+2. **Shuttle-style controlled randomized scheduling** for larger interleavings, recording the scheduler seed/schedule so failures replay deterministically. Randomized exploration finds bugs but is not exhaustive.
+3. **Jepsen-style black-box history checking** against live multi-process Xenia sessions with packet loss, partitions, delayed/reordered frames, process kills, clock skew and restart. Record invocation/completion histories and check that the observed history conforms to the dispatch/revocation state machine.
+
+The long-term ambition is a FoundationDB-style deterministic simulator with injectable network, disk, clock and process-failure interfaces. That is not implemented by this PR. Model-only, randomized, and live multi-process results must be reported separately.
+
 ## Adapter sequence for live Xenia senders
 
 The intended adapter sequence for a host-to-viewer frame, audio, telemetry, clipboard disclosure, or file chunk is:
