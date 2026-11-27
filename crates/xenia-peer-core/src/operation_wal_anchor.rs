@@ -639,6 +639,9 @@ pub enum OperationWalAnchorError {
     /// Current process boot fingerprint differs from the lease owner.
     #[error("operation sequence lease belongs to another process boot")]
     BootFingerprintMismatch,
+    /// Process boot identity must be fresh and nonzero.
+    #[error("operation sequence lease boot fingerprint is invalid")]
+    InvalidBootFingerprint,
     /// Lease timestamp/expiry is invalid at current time.
     #[error("operation sequence lease is expired or not yet valid")]
     LeaseExpired,
@@ -995,6 +998,14 @@ fn validate_checkpoint(checkpoint: &OperationWalCheckpoint) -> Result<(), Operat
     if checkpoint.witness_sequence == 0 {
         return Err(OperationWalAnchorError::NonMonotonicWitnessSequence);
     }
+    if (checkpoint.witness_sequence == 1)
+        != (checkpoint.previous_checkpoint_fingerprint == [0; 32])
+    {
+        return Err(OperationWalAnchorError::PreviousCheckpointMismatch);
+    }
+    if checkpoint.wal_sequence == 0 && checkpoint.wal_head_hash != [0; 32] {
+        return Err(OperationWalAnchorError::GenesisHeadMismatch);
+    }
     Ok(())
 }
 
@@ -1012,6 +1023,12 @@ fn validate_lease(lease: &OperationSequenceLease) -> Result<(), OperationWalAnch
     }
     if lease.expires_at_unix_secs <= lease.issued_at_unix_secs {
         return Err(OperationWalAnchorError::InvalidLeaseLifetime);
+    }
+    if (lease.lease_generation == 1) != (lease.previous_lease_fingerprint == [0; 32]) {
+        return Err(OperationWalAnchorError::LeaseRangeReuse);
+    }
+    if lease.owner_boot_fingerprint == [0; 32] {
+        return Err(OperationWalAnchorError::InvalidBootFingerprint);
     }
     Ok(())
 }
