@@ -35,8 +35,13 @@ use serde::{Deserialize, Serialize};
 use serde_big_array::BigArray;
 use thiserror::Error;
 
+use crate::operation_wal_merkle::{
+    OperationWalMerkleConsistencyProof, operation_wal_merkle_root,
+    verify_operation_wal_consistency_proof,
+};
+
 /// Schema for independently witnessed operation-WAL checkpoints.
-pub const OPERATION_WAL_CHECKPOINT_SCHEMA: &str = "xenia-operation-wal-checkpoint-v1";
+pub const OPERATION_WAL_CHECKPOINT_SCHEMA: &str = "xenia-operation-wal-checkpoint-v2";
 /// Schema for process-bound operation-sequence leases.
 pub const OPERATION_SEQUENCE_LEASE_SCHEMA: &str = "xenia-operation-sequence-lease-v1";
 /// Maximum independent witness signatures accepted in one bundle.
@@ -60,6 +65,10 @@ pub struct OperationWalCheckpoint {
     pub wal_sequence: u64,
     /// Exact local WAL hash-chain head at wal_sequence.
     pub wal_head_hash: [u8; 32],
+    /// Number of record hashes committed by the Merkle root; equals wal_sequence.
+    pub wal_merkle_tree_size: u64,
+    /// RFC 9162-style SHA-256 Merkle root over the ordered WAL record hashes.
+    pub wal_merkle_root: [u8; 32],
     /// Monotonic generation maintained by the independent witness store.
     pub witness_sequence: u64,
     /// Fingerprint of the immediately preceding witnessed checkpoint.
@@ -80,6 +89,8 @@ impl OperationWalCheckpoint {
         clock_domain: u64,
         wal_sequence: u64,
         wal_head_hash: [u8; 32],
+        wal_merkle_tree_size: u64,
+        wal_merkle_root: [u8; 32],
         timestamp_unix_secs: u64,
     ) -> Result<Self, OperationWalAnchorError> {
         let (witness_sequence, previous_checkpoint_fingerprint) = match previous {
@@ -108,6 +119,8 @@ impl OperationWalCheckpoint {
             clock_domain,
             wal_sequence,
             wal_head_hash,
+            wal_merkle_tree_size,
+            wal_merkle_root,
             witness_sequence,
             previous_checkpoint_fingerprint,
             timestamp_unix_secs,
@@ -712,11 +725,13 @@ pub fn operation_wal_checkpoint_fingerprint(
 ) -> Result<[u8; 32], OperationWalAnchorError> {
     validate_checkpoint(checkpoint)?;
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"XENIA-OPERATION-WAL-CHECKPOINT-V1\0");
+    hasher.update(b"XENIA-OPERATION-WAL-CHECKPOINT-V2\0");
     hasher.update(&checkpoint.session_fingerprint);
     hasher.update(&checkpoint.clock_domain.to_be_bytes());
     hasher.update(&checkpoint.wal_sequence.to_be_bytes());
     hasher.update(&checkpoint.wal_head_hash);
+    hasher.update(&checkpoint.wal_merkle_tree_size.to_be_bytes());
+    hasher.update(&checkpoint.wal_merkle_root);
     hasher.update(&checkpoint.witness_sequence.to_be_bytes());
     hasher.update(&checkpoint.previous_checkpoint_fingerprint);
     hasher.update(&checkpoint.timestamp_unix_secs.to_be_bytes());
@@ -997,6 +1012,14 @@ fn validate_checkpoint(checkpoint: &OperationWalCheckpoint) -> Result<(), Operat
     }
     if checkpoint.witness_sequence == 0 {
         return Err(OperationWalAnchorError::NonMonotonicWitnessSequence);
+    }
+    if checkpoint.wal_merkle_tree_size != checkpoint.wal_sequence {
+        return Err(OperationWalAnchorError::MerkleTreeSizeMismatch);
+    }
+    if checkpoint.wal_merkle_tree_size == 0
+        && checkpoint.wal_merkle_root != operation_wal_merkle_root(&[])
+    {
+        return Err(OperationWalAnchorError::GenesisMerkleRootMismatch);
     }
     if (checkpoint.witness_sequence == 1)
         != (checkpoint.previous_checkpoint_fingerprint == [0; 32])
