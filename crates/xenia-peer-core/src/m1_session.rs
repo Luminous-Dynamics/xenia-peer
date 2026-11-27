@@ -452,7 +452,8 @@ impl M1SessionMachine {
     /// The actual read and transport send are recorded separately.
     pub fn read_host_clipboard(&mut self) -> Result<(), M1SessionError> {
         self.require_active(M1Permission::ReadHostClipboard)?;
-        self.audit.push(M1AuditEvent::HostClipboardReadPermissionAdmitted);
+        self.audit
+            .push(M1AuditEvent::HostClipboardReadPermissionAdmitted);
         Ok(())
     }
 
@@ -460,7 +461,8 @@ impl M1SessionMachine {
     /// The actual OS clipboard result is recorded separately.
     pub fn write_host_clipboard(&mut self) -> Result<(), M1SessionError> {
         self.require_active(M1Permission::WriteHostClipboard)?;
-        self.audit.push(M1AuditEvent::HostClipboardWritePermissionAdmitted);
+        self.audit
+            .push(M1AuditEvent::HostClipboardWritePermissionAdmitted);
         Ok(())
     }
 
@@ -506,15 +508,9 @@ impl M1SessionMachine {
     ) -> Result<(), M1SessionError> {
         self.require_active(M1Permission::ReadHostClipboard)?;
         let event = match outcome {
-            M1ClipboardReadOutcome::ReadCompleted => {
-                M1AuditEvent::HostClipboardReadCompleted
-            }
-            M1ClipboardReadOutcome::NotAttempted => {
-                M1AuditEvent::HostClipboardReadNotAttempted
-            }
-            M1ClipboardReadOutcome::OutcomeUnknown => {
-                M1AuditEvent::HostClipboardReadOutcomeUnknown
-            }
+            M1ClipboardReadOutcome::ReadCompleted => M1AuditEvent::HostClipboardReadCompleted,
+            M1ClipboardReadOutcome::NotAttempted => M1AuditEvent::HostClipboardReadNotAttempted,
+            M1ClipboardReadOutcome::OutcomeUnknown => M1AuditEvent::HostClipboardReadOutcomeUnknown,
         };
         self.audit.push(event);
         Ok(())
@@ -528,9 +524,7 @@ impl M1SessionMachine {
         self.require_active(M1Permission::WriteHostClipboard)?;
         let event = match outcome {
             M1ClipboardWriteOutcome::Applied => M1AuditEvent::HostClipboardWriteApplied,
-            M1ClipboardWriteOutcome::NotAttempted => {
-                M1AuditEvent::HostClipboardWriteNotAttempted
-            }
+            M1ClipboardWriteOutcome::NotAttempted => M1AuditEvent::HostClipboardWriteNotAttempted,
             M1ClipboardWriteOutcome::OutcomeUnknown => {
                 M1AuditEvent::HostClipboardWriteOutcomeUnknown
             }
