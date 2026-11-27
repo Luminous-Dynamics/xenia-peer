@@ -438,36 +438,43 @@ pub struct OperationSequenceLeaseBundle {
     pub witnesses: Vec<OperationWalWitnessSignature>,
 }
 
-impl OperationSequenceLeaseBundle {
-    /// Start a witness bundle for a valid lease.
-    pub fn new(lease: OperationSequenceLease) -> Result<Self, OperationWalAnchorError> {
-        validate_lease(&lease)?;
-        Ok(Self { lease, witnesses: Vec::new() })
+/// Opaque lease verified once against the independent witness quorum.
+///
+/// Hold this token in the active session runtime. Its private field prevents
+/// callers from manufacturing a verified lease. Per-operation admission uses
+/// the constant-time range check in contains(), not repeated Ed25519 verifies.
+#[derive(Debug)]
+pub struct VerifiedOperationSequenceLease {
+    lease: OperationSequenceLease,
+}
+
+impl VerifiedOperationSequenceLease {
+    /// Whether an operation sequence belongs to the verified reserved range.
+    pub fn contains(&self, operation_sequence: u64) -> bool {
+        self.lease.contains(operation_sequence)
     }
 
-    /// Add one independent signature over this exact lease.
-    pub fn sign_with(
-        &mut self,
-        signing_key: &SigningKey,
-        observed_at_unix_secs: u64,
-    ) -> Result<(), OperationWalAnchorError> {
-        if observed_at_unix_secs < self.lease.issued_at_unix_secs {
-            return Err(OperationWalAnchorError::WitnessPredatesStatement);
-        }
-        if self.witnesses.len() >= MAX_OPERATION_WAL_WITNESSES {
-            return Err(OperationWalAnchorError::TooManyWitnesses);
-        }
-        let public_key = signing_key.verifying_key().to_bytes();
-        if self.witnesses.iter().any(|w| w.witness_public_key == public_key) {
-            return Err(OperationWalAnchorError::DuplicateWitness);
-        }
-        let digest = operation_sequence_lease_fingerprint(&self.lease)?;
-        self.witnesses.push(OperationWalWitnessSignature::sign(
-            signing_key, digest, observed_at_unix_secs,
-        ));
-        Ok(())
+    /// First sequence in the verified lease, inclusive.
+    pub fn first_operation_sequence(&self) -> u64 {
+        self.lease.first_operation_sequence
+    }
+
+    /// Last sequence in the verified lease, inclusive.
+    pub fn last_operation_sequence(&self) -> u64 {
+        self.lease.last_operation_sequence
+    }
+
+    /// Authority epoch bound to the verified lease.
+    pub fn authority_epoch(&self) -> u64 {
+        self.lease.authority_epoch
+    }
+
+    /// Process boot fingerprint bound to the verified lease.
+    pub fn owner_boot_fingerprint(&self) -> [u8; 32] {
+        self.lease.owner_boot_fingerprint
     }
 }
+
 
 /// Fail-closed errors returned by the checkpoint/lease protocol.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -893,6 +900,11 @@ pub fn verify_sequence_lease_successor(
 }
 
 /// Verify a witnessed lease for one operation in the current process/session.
+/// Verify a lease once for the active process/session and return an opaque token.
+///
+/// Runtime send paths should call this when acquiring/renewing a lease, then
+/// use VerifiedOperationSequenceLease::contains for each operation. This
+/// avoids running the witness-signature quorum on every frame.
 pub fn verify_sequence_lease_for_use(
     bundle: &OperationSequenceLeaseBundle,
     policy: &OperationWalWitnessPolicy,
@@ -901,8 +913,7 @@ pub fn verify_sequence_lease_for_use(
     session_fingerprint: [u8; 32],
     authority_epoch: u64,
     owner_boot_fingerprint: [u8; 32],
-    operation_sequence: u64,
-) -> Result<(), OperationWalAnchorError> {
+) -> Result<VerifiedOperationSequenceLease, OperationWalAnchorError> {
     verify_sequence_lease_witness_quorum(bundle, policy)?;
     let lease = &bundle.lease;
     if lease.session_fingerprint != session_fingerprint {
@@ -918,10 +929,7 @@ pub fn verify_sequence_lease_for_use(
     if now_unix_secs < lease.issued_at_unix_secs || now_unix_secs > lease.expires_at_unix_secs {
         return Err(OperationWalAnchorError::LeaseExpired);
     }
-    if !lease.contains(operation_sequence) {
-        return Err(OperationWalAnchorError::OperationSequenceOutsideLease);
-    }
-    Ok(())
+    Ok(VerifiedOperationSequenceLease { lease: lease.clone() })
 }
 
 fn validate_checkpoint(checkpoint: &OperationWalCheckpoint) -> Result<(), OperationWalAnchorError> {
