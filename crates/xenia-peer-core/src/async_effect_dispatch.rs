@@ -29,14 +29,16 @@
 //! acknowledgement. This is a local ordering primitive, not an authorization
 //! engine or a durable journal.
 
-use std::collections::{HashMap, hash_map::Entry};
+use std::collections::{HashMap, VecDeque, hash_map::Entry};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::m1_session::M1Permission;
 
-/// Maximum number of logical operations retained by one dispatch gate.
-pub const MAX_ASYNC_DISPATCH_OPERATIONS: usize = 4_096;
+/// Maximum number of prepared/in-flight/unknown dispatches retained at once.
+pub const MAX_OUTSTANDING_ASYNC_DISPATCHES: usize = 4_096;
+/// Maximum recent reconciliation receipts cached for in-memory idempotency.
+pub const MAX_RECENT_DISPATCH_RECONCILIATIONS: usize = 1_024;
 
 static NEXT_DISPATCH_GATE_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -53,8 +55,10 @@ pub enum DispatchDirection {
 /// Payload-redacted identity of one logical transport dispatch.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DispatchRequest {
-    /// Stable operation identity retained across reconnect/retry.
+    /// Stable operation identity derived from the authenticated session and operation sequence.
     pub operation_id: [u8; 16],
+    /// Strictly increasing per-session sequence; never reset across rekey/regrant.
+    pub operation_sequence: u64,
     /// Authenticated session fingerprint.
     pub session_fingerprint: [u8; 32],
     /// Exact permission lane independently authorized by the caller.
@@ -120,6 +124,8 @@ pub struct DispatchReceipt {
     pub context_digest: [u8; 32],
     /// Authority epoch at admission.
     pub authority_epoch: u64,
+    /// Monotonic per-session operation sequence.
+    pub operation_sequence: u64,
     /// Local transport outcome; never implies remote application.
     pub outcome: TransportDispatchOutcome,
     /// Digest of transport evidence supplied by the caller.
@@ -278,7 +284,7 @@ pub struct DispatchGateSnapshot {
     pub authority_epoch: u64,
     /// Whether new dispatch admissions are permitted.
     pub active: bool,
-    /// Unique operation IDs retained.
+    /// Currently outstanding operation IDs (prepared, in-flight, unknown).
     pub operation_count: usize,
     /// Permits prepared but not yet admitted to dispatch.
     pub prepared_operations: usize,
@@ -288,8 +294,10 @@ pub struct DispatchGateSnapshot {
     pub unknown_operations: usize,
     /// Locally accepted transport sends.
     pub accepted_operations: usize,
-    /// Permits invalidated/dropped before dispatch.
+    /// Cumulative permits invalidated/dropped before dispatch.
     pub cancelled_before_dispatch: usize,
+    /// Cumulative reconciled unknown dispatches.
+    pub reconciled_operations: usize,
 }
 
 /// Fail-closed errors from the asynchronous dispatch gate.
@@ -328,6 +336,15 @@ pub enum DispatchGateError {
     ReconciliationConflict,
     /// Reactivation was attempted on an active gate.
     NotRevoked,
+    /// The caller supplied an operation sequence which is not strictly increasing.
+    NonMonotonicOperationSequence {
+        /// Last admitted operation sequence.
+        previous: u64,
+        /// Requested operation sequence.
+        observed: u64,
+    },
+    /// The operation ID does not match the canonical session/epoch/lane/sequence/context digest.
+    OperationIdentityMismatch,
     /// The new authority epoch must strictly increase.
     NonMonotonicEpoch {
         /// Current epoch.
@@ -356,11 +373,6 @@ enum OperationState {
         evidence_digest: [u8; 32],
     },
     CancelledBeforeDispatch,
-    Reconciled {
-        original_unknown_digest: [u8; 32],
-        outcome: DispatchReconciliationOutcome,
-        receipt_digest: [u8; 32],
-    },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -373,8 +385,14 @@ struct OperationRecord {
 struct DispatchInner {
     session_fingerprint: [u8; 32],
     authority_epoch: u64,
+    last_admitted_sequence: Option<u64>,
     phase: GatePhase,
     operations: HashMap<[u8; 16], OperationRecord>,
+    recent_reconciliations: HashMap<[u8; 16], DispatchReconciliationReceipt>,
+    reconciliation_order: VecDeque<[u8; 16]>,
+    accepted_total: usize,
+    cancelled_before_dispatch_total: usize,
+    reconciled_total: usize,
 }
 
 /// Non-blocking local state machine for async transport dispatch admission.
@@ -404,8 +422,14 @@ impl TransportDispatchGate {
             inner: Arc::new(Mutex::new(DispatchInner {
                 session_fingerprint,
                 authority_epoch,
+                last_admitted_sequence: None,
                 phase: GatePhase::Active,
                 operations: HashMap::new(),
+                recent_reconciliations: HashMap::new(),
+                reconciliation_order: VecDeque::new(),
+                accepted_total: 0,
+                cancelled_before_dispatch_total: 0,
+                reconciled_total: 0,
             })),
         })
     }
