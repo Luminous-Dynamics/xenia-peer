@@ -1083,7 +1083,7 @@ impl M1RuntimeSession {
         let outcome = match &result {
             HostClipboardReadExecution::Completed(_) => M1ClipboardReadOutcome::ReadCompleted,
             HostClipboardReadExecution::NotAttempted(_) => M1ClipboardReadOutcome::NotAttempted,
-            HostClipboardReadExecution::OutcomeUnknown(_) => M1ClipboardReadOutcome::OutcomeUnknown
+            HostClipboardReadExecution::OutcomeUnknown(_) => M1ClipboardReadOutcome::OutcomeUnknown,
         };
         self.session.record_host_clipboard_read_outcome(outcome)?;
         self.flush_new_audit_events()?;
