@@ -11,7 +11,7 @@
 use crate::frame::{PixelFormat, RawFrame};
 use crate::frame_reassembly::{
     DEFAULT_MAX_FRAGMENT_BYTES, DEFAULT_MAX_FRAGMENTS_PER_FRAME, DEFAULT_MAX_FRAME_BYTES,
-    FrameFragment, FragmentFrameKey, FragmentFrameMetadata,
+    FragmentFrameKey, FragmentFrameMetadata, FrameFragment,
 };
 
 /// Errors returned before fragment iteration begins.
@@ -92,9 +92,7 @@ impl<'a> FrameFragmentIter<'a> {
         }
 
         let fragment_count = frame.pixels.len().div_ceil(max_fragment_bytes);
-        if fragment_count == 0
-            || fragment_count > usize::from(DEFAULT_MAX_FRAGMENTS_PER_FRAME)
-        {
+        if fragment_count == 0 || fragment_count > usize::from(DEFAULT_MAX_FRAGMENTS_PER_FRAME) {
             return Err(FrameFragmentationError::TooManyFragments);
         }
 
@@ -176,14 +174,7 @@ mod tests {
     };
 
     fn encoded_frame(frame_id: u64, bytes: Vec<u8>) -> RawFrame {
-        RawFrame::encoded(
-            frame_id,
-            123,
-            1280,
-            720,
-            PixelFormat::H264,
-            bytes,
-        )
+        RawFrame::encoded(frame_id, 123, 1280, 720, PixelFormat::H264, bytes)
     }
 
     #[test]
@@ -194,9 +185,7 @@ mod tests {
             .unwrap_or_else(|error| panic!("fragmenter rejected frame: {error:?}"));
         assert_eq!(iter.len(), 5);
         let mut fragments = iter.collect::<Vec<_>>();
-        assert!(fragments
-            .iter()
-            .all(|fragment| fragment.payload.len() <= 8));
+        assert!(fragments.iter().all(|fragment| fragment.payload.len() <= 8));
 
         let mut receiver = FrameReassembler::new(
             [7; 32],
@@ -251,9 +240,7 @@ mod tests {
         let frame = encoded_frame(44, b"one-frame".to_vec());
         let mut iter = FrameFragmentIter::new(&frame, [9; 32], 2, 64)
             .unwrap_or_else(|error| panic!("fragmenter rejected frame: {error:?}"));
-        let fragment = iter
-            .next()
-            .unwrap_or_else(|| panic!("fragment missing"));
+        let fragment = iter.next().unwrap_or_else(|| panic!("fragment missing"));
         assert_eq!(fragment.fragment_index, 0);
         assert_eq!(fragment.fragment_count, 1);
         assert_eq!(fragment.total_frame_bytes, frame.pixels.len());
@@ -273,13 +260,7 @@ mod tests {
             Some(FrameFragmentationError::InvalidFragmentSize)
         );
         assert_eq!(
-            FrameFragmentIter::new(
-                &frame,
-                [1; 32],
-                1,
-                DEFAULT_MAX_FRAGMENT_BYTES + 1,
-            )
-            .err(),
+            FrameFragmentIter::new(&frame, [1; 32], 1, DEFAULT_MAX_FRAGMENT_BYTES + 1,).err(),
             Some(FrameFragmentationError::InvalidFragmentSize)
         );
     }
@@ -311,14 +292,7 @@ mod tests {
 
     #[test]
     fn non_video_format_is_rejected() {
-        let frame = RawFrame::encoded(
-            48,
-            1,
-            1280,
-            720,
-            PixelFormat::Audio,
-            vec![1, 2, 3],
-        );
+        let frame = RawFrame::encoded(48, 1, 1280, 720, PixelFormat::Audio, vec![1, 2, 3]);
         assert_eq!(
             FrameFragmentIter::new(&frame, [1; 32], 1, 2).err(),
             Some(FrameFragmentationError::UnsupportedPixelFormat)
@@ -327,14 +301,7 @@ mod tests {
 
     #[test]
     fn zero_dimensions_are_rejected() {
-        let frame = RawFrame::encoded(
-            51,
-            1,
-            0,
-            720,
-            PixelFormat::H264,
-            vec![1, 2, 3],
-        );
+        let frame = RawFrame::encoded(51, 1, 0, 720, PixelFormat::H264, vec![1, 2, 3]);
         assert_eq!(
             FrameFragmentIter::new(&frame, [1; 32], 1, 2).err(),
             Some(FrameFragmentationError::InvalidDimensions)
@@ -368,6 +335,9 @@ mod tests {
         assert_eq!(iter.size_hint(), (5, Some(5)));
         let fragments = iter.collect::<Vec<_>>();
         assert_eq!(fragments.len(), 5);
-        assert_eq!(fragments.last().map(|fragment| fragment.payload.len()), Some(1));
+        assert_eq!(
+            fragments.last().map(|fragment| fragment.payload.len()),
+            Some(1)
+        );
     }
 }
