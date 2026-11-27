@@ -543,9 +543,7 @@ mod tests {
 
     #[test]
     fn oversized_envelope_is_rejected_before_stream_guard_creation() {
-        let len = u32::try_from(MAX_ENVELOPE_BYTES)
-            .unwrap_or(u32::MAX)
-            .saturating_add(1);
+        let len = MAX_ENVELOPE_BYTES.saturating_add(1);
         assert!(len > MAX_ENVELOPE_BYTES);
         assert!(ensure_stream_side_open(false).is_ok());
     }
