@@ -125,6 +125,7 @@ impl OperationWalCheckpoint {
             previous_checkpoint_fingerprint,
             timestamp_unix_secs,
         };
+        validate_checkpoint(&candidate)?;
         if let Some(previous) = previous {
             verify_checkpoint_successor(previous, &candidate)?;
         } else if wal_sequence == 0 && wal_head_hash != [0; 32] {
