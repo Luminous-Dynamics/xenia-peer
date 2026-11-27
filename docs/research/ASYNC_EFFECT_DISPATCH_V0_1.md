@@ -36,6 +36,8 @@ The active map retains only prepared, in-flight and UNKNOWN operations. Accepted
 
 The current code contains a Loom exhaustive model of the reduced three-thread interleaving between dispatch admission, transport completion, and revoke. It checks the single-winner ordering contract across the model's explored schedules. This model is deliberately small and is not a proof of the full production implementation or of network behavior. The ordinary threaded test exercises the production gate implementation; Loom exercises the reduced transition model.
 
+The current PR already includes a reduced three-thread Loom model alongside the production-gate threaded race test. Loom exhaustively permutes small concurrent executions under its modeled memory model. Shuttle is a useful complementary randomized scheduler: it scales to larger tests and records replayable schedules, but it explicitly does not offer the exhaustive/sound guarantee of Loom. FoundationDB demonstrates the next step at system scale: deterministic virtual-time simulation of a whole cluster with injectable network, disk and machine failures. Jepsen provides the complementary black-box method: run real distributed binaries under nemesis faults, record invocation/completion histories, and check those histories against a consistency model.
+
 The larger qualification should use three distinct layers:
 
 1. **Loom** for exhaustive small-state synchronization models and minimal counterexamples.
@@ -90,6 +92,10 @@ Primary references:
 - PostgreSQL 18 WAL settings: https://www.postgresql.org/docs/18/runtime-config-wal.html
 - TUF current specification: https://theupdateframework.github.io/specification/latest/
 - NIST SP 800-193 resiliency principles: https://csrc.nist.gov/pubs/sp/800/193/final
+- Loom concurrency model checker: https://docs.rs/loom/latest/loom/
+- Shuttle randomized concurrency testing and replay: https://docs.rs/shuttle/latest/shuttle/
+- FoundationDB simulation/testing approach: https://github.com/apple/foundationdb/blob/main/documentation/sphinx/source/testing.rst
+- Jepsen analyses and history-checking methods: https://jepsen.io/analyses
 
 ## Benchmark programme
 
