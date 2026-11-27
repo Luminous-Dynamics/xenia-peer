@@ -848,6 +848,9 @@ impl DurableOperationEvidenceJournal {
     ) -> Result<(), DurableOperationJournalError> {
         let current = self.ledger.snapshot(operation_id)?;
         let reserved = self.reserved_event_slots()?;
+        // Add the complete outstanding reservation before subtracting
+        // this operation's current reservation. Subtracting first can
+        // underflow for a small event count even when the final budget fits.
         let required = self
             .ledger
             .events()
