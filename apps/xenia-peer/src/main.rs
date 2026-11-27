@@ -1796,9 +1796,7 @@ fn read_host_clipboard_text() -> crate::m1_runtime::HostClipboardReadExecution {
     let mut clipboard = match arboard::Clipboard::new() {
         Ok(clipboard) => clipboard,
         Err(err) => {
-            return crate::m1_runtime::HostClipboardReadExecution::NotAttempted(
-                err.to_string(),
-            );
+            return crate::m1_runtime::HostClipboardReadExecution::NotAttempted(err.to_string());
         }
     };
     match clipboard.get_text() {
@@ -1806,9 +1804,7 @@ fn read_host_clipboard_text() -> crate::m1_runtime::HostClipboardReadExecution {
         Err(arboard::Error::ContentNotAvailable) => {
             crate::m1_runtime::HostClipboardReadExecution::Completed(None)
         }
-        Err(err) => {
-            crate::m1_runtime::HostClipboardReadExecution::OutcomeUnknown(err.to_string())
-        }
+        Err(err) => crate::m1_runtime::HostClipboardReadExecution::OutcomeUnknown(err.to_string()),
     }
 }
 
@@ -1823,20 +1819,16 @@ fn apply_clipboard_content(
     if let ClipboardContent::Text(text) = content
         && text.len() > MAX_INBOUND_CLIPBOARD_BYTES
     {
-        return crate::m1_runtime::HostClipboardWriteExecution::NotAttempted(
-            format!(
-                "viewer clipboard update is {} bytes; cap is {}",
-                text.len(),
-                MAX_INBOUND_CLIPBOARD_BYTES
-            ),
-        );
+        return crate::m1_runtime::HostClipboardWriteExecution::NotAttempted(format!(
+            "viewer clipboard update is {} bytes; cap is {}",
+            text.len(),
+            MAX_INBOUND_CLIPBOARD_BYTES
+        ));
     }
     let mut clipboard = match arboard::Clipboard::new() {
         Ok(clipboard) => clipboard,
         Err(err) => {
-            return crate::m1_runtime::HostClipboardWriteExecution::NotAttempted(
-                err.to_string(),
-            );
+            return crate::m1_runtime::HostClipboardWriteExecution::NotAttempted(err.to_string());
         }
     };
     // set_text("") actively claims ownership with empty content; clipboard.clear()
@@ -1847,9 +1839,7 @@ fn apply_clipboard_content(
     };
     match result {
         Ok(()) => crate::m1_runtime::HostClipboardWriteExecution::Applied,
-        Err(err) => {
-            crate::m1_runtime::HostClipboardWriteExecution::OutcomeUnknown(err.to_string())
-        }
+        Err(err) => crate::m1_runtime::HostClipboardWriteExecution::OutcomeUnknown(err.to_string()),
     }
 }
 
@@ -6697,17 +6687,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .unwrap_or("unavailable");
                 match injection_result {
                     crate::m1_runtime::InputEffectExecution::PlatformAccepted => {
-                        info!(
-                            ?event,
-                            backend,
-                            "platform input injector accepted event"
-                        );
+                        info!(?event, backend, "platform input injector accepted event");
                     }
                     crate::m1_runtime::InputEffectExecution::NotAttempted(reason) => {
                         warn!(
                             reason,
-                            backend,
-                            "input event was not attempted by a platform backend"
+                            backend, "input event was not attempted by a platform backend"
                         );
                     }
                     crate::m1_runtime::InputEffectExecution::OutcomeUnknown(error) => {
@@ -6895,8 +6880,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if sent_clipboard <= 3 || sent_clipboard.is_multiple_of(10) {
                         info!(
                             sent = sent_clipboard,
-                            frame_id,
-                            "clipboard update sealed and sent"
+                            frame_id, "clipboard update sealed and sent"
                         );
                     }
                 }
@@ -7420,5 +7404,4 @@ mod consent_scope_tests {
         assert!(admitted < accepted);
         assert!(accepted < revoked);
     }
-
 }
