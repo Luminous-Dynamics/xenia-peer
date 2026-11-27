@@ -547,7 +547,7 @@ mod tests {
             .unwrap_or(u32::MAX)
             .saturating_add(1);
         assert!(len > MAX_ENVELOPE_BYTES);
-        assert_eq!(ensure_stream_side_open(false), Ok(()));
+        assert!(ensure_stream_side_open(false).is_ok());
     }
 
     #[test]
