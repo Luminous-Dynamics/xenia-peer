@@ -96,6 +96,7 @@ impl Drop for DispatchPermit {
                 });
             if is_prepared {
                 inner.operations.remove(&self.request.operation_id);
+                inner.prepared_count = inner.prepared_count.saturating_sub(1);
                 inner.cancelled_before_dispatch_total =
                     inner.cancelled_before_dispatch_total.saturating_add(1);
             }
@@ -190,11 +191,14 @@ impl DispatchGuard {
         match outcome {
             TransportDispatchOutcome::AcceptedByTransport => {
                 inner.operations.remove(&self.request.operation_id);
+                inner.in_flight_count = inner.in_flight_count.saturating_sub(1);
                 inner.accepted_total = inner.accepted_total.saturating_add(1);
             }
             TransportDispatchOutcome::Unknown => {
                 if let Some(record) = inner.operations.get_mut(&self.request.operation_id) {
                     record.state = OperationState::Unknown { evidence_digest };
+                    inner.in_flight_count = inner.in_flight_count.saturating_sub(1);
+                    inner.unknown_count = inner.unknown_count.saturating_add(1);
                 }
             }
         }
@@ -228,6 +232,8 @@ impl Drop for DispatchGuard {
             record.state = OperationState::Unknown {
                 evidence_digest: self.fallback_unknown_digest,
             };
+            inner.in_flight_count = inner.in_flight_count.saturating_sub(1);
+            inner.unknown_count = inner.unknown_count.saturating_add(1);
         }
     }
 }
@@ -396,6 +402,9 @@ struct DispatchInner {
     last_admitted_sequence: Option<u64>,
     phase: GatePhase,
     operations: HashMap<[u8; 16], OperationRecord>,
+    prepared_count: usize,
+    in_flight_count: usize,
+    unknown_count: usize,
     recent_reconciliations: HashMap<[u8; 16], DispatchReconciliationReceipt>,
     reconciliation_order: VecDeque<[u8; 16]>,
     accepted_total: usize,
@@ -447,6 +456,9 @@ impl TransportDispatchGate {
                 last_admitted_sequence: Some(last_admitted_sequence),
                 phase: GatePhase::Active,
                 operations: HashMap::new(),
+                prepared_count: 0,
+                in_flight_count: 0,
+                unknown_count: 0,
                 recent_reconciliations: HashMap::new(),
                 reconciliation_order: VecDeque::new(),
                 accepted_total: 0,
@@ -475,11 +487,7 @@ impl TransportDispatchGate {
                 requested: request.authority_epoch,
             });
         }
-        if inner
-            .operations
-            .values()
-            .any(|record| matches!(record.state, OperationState::Unknown { .. }))
-        {
+        if inner.unknown_count > 0 {
             return Err(DispatchGateError::UnknownOutcomeOutstanding);
         }
         if inner.operations.contains_key(&request.operation_id) {
@@ -514,6 +522,7 @@ impl TransportDispatchGate {
                     request,
                     state: OperationState::Prepared,
                 });
+                inner.prepared_count = inner.prepared_count.saturating_add(1);
             }
             Entry::Occupied(_) => return Err(DispatchGateError::DuplicateOperation),
         }
@@ -559,6 +568,8 @@ impl TransportDispatchGate {
             return Err(DispatchGateError::OperationNotInFlight);
         }
         record.state = OperationState::InFlight;
+        inner.prepared_count = inner.prepared_count.saturating_sub(1);
+        inner.in_flight_count = inner.in_flight_count.saturating_add(1);
         permit.consumed = true;
         let request = permit.request;
         drop(inner);
@@ -601,6 +612,7 @@ impl TransportDispatchGate {
             .collect();
         for operation_id in prepared_operations {
             inner.operations.remove(&operation_id);
+            inner.prepared_count = inner.prepared_count.saturating_sub(1);
             inner.cancelled_before_dispatch_total =
                 inner.cancelled_before_dispatch_total.saturating_add(1);
         }
@@ -657,6 +669,7 @@ impl TransportDispatchGate {
             receipt_digest,
         };
         inner.operations.remove(&operation_id);
+        inner.unknown_count = inner.unknown_count.saturating_sub(1);
         inner.recent_reconciliations.insert(operation_id, receipt);
         inner.reconciliation_order.push_back(operation_id);
         while inner.reconciliation_order.len() > MAX_RECENT_DISPATCH_RECONCILIATIONS {
@@ -692,11 +705,7 @@ impl TransportDispatchGate {
         {
             return Err(DispatchGateError::InFlightOutstanding);
         }
-        if inner
-            .operations
-            .values()
-            .any(|record| matches!(record.state, OperationState::Unknown { .. }))
-        {
+        if inner.unknown_count > 0 {
             return Err(DispatchGateError::UnknownOutcomeOutstanding);
         }
         let previous_epoch = inner.authority_epoch;
@@ -718,20 +727,13 @@ impl TransportDispatchGate {
             authority_epoch: inner.authority_epoch,
             active: inner.phase == GatePhase::Active,
             operation_count: inner.operations.len(),
-            prepared_operations: 0,
-            in_flight_operations: 0,
-            unknown_operations: 0,
+            prepared_operations: inner.prepared_count,
+            in_flight_operations: inner.in_flight_count,
+            unknown_operations: inner.unknown_count,
             accepted_operations: inner.accepted_total,
             cancelled_before_dispatch: inner.cancelled_before_dispatch_total,
             reconciled_operations: inner.reconciled_total,
         };
-        for record in inner.operations.values() {
-            match record.state {
-                OperationState::Prepared => snapshot.prepared_operations += 1,
-                OperationState::InFlight => snapshot.in_flight_operations += 1,
-                OperationState::Unknown { .. } => snapshot.unknown_operations += 1,
-            }
-        }
         Ok(snapshot)
     }
 
