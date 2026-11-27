@@ -1266,4 +1266,82 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn loom_exhaustively_checks_dispatch_revoke_and_completion_order() {
+        loom::model(|| {
+            use loom::sync::{Arc, Mutex};
+            use loom::thread;
+
+            #[derive(Default)]
+            struct ModelState {
+                active: bool,
+                prepared: bool,
+                in_flight: bool,
+                accepted: bool,
+                cancelled: bool,
+                revoke_saw_in_flight: bool,
+            }
+
+            let state = Arc::new(Mutex::new(ModelState {
+                active: true,
+                prepared: true,
+                ..ModelState::default()
+            }));
+
+            let dispatch_state = Arc::clone(&state);
+            let dispatch = thread::spawn(move || {
+                let mut state = dispatch_state.lock().expect("model lock poisoned");
+                if state.active && state.prepared {
+                    state.prepared = false;
+                    state.in_flight = true;
+                    true
+                } else {
+                    false
+                }
+            });
+
+            let finish_state = Arc::clone(&state);
+            let finish = thread::spawn(move || {
+                let mut state = finish_state.lock().expect("model lock poisoned");
+                if state.in_flight {
+                    state.in_flight = false;
+                    state.accepted = true;
+                }
+            });
+
+            let revoke_state = Arc::clone(&state);
+            let revoke = thread::spawn(move || {
+                let mut state = revoke_state.lock().expect("model lock poisoned");
+                state.active = false;
+                if state.prepared {
+                    state.prepared = false;
+                    state.cancelled = true;
+                }
+                if state.in_flight {
+                    state.revoke_saw_in_flight = true;
+                }
+            });
+
+            let dispatch_admitted = dispatch
+                .join()
+                .expect("model dispatch thread panicked");
+            finish.join().expect("model finish thread panicked");
+            revoke.join().expect("model revoke thread panicked");
+
+            let state = state.lock().expect("model lock poisoned");
+            assert!(!state.in_flight);
+            if dispatch_admitted {
+                assert!(
+                    state.revoke_saw_in_flight || state.accepted,
+                    "an admitted send must be either in flight at revoke or already accepted"
+                );
+                assert!(!state.cancelled);
+            } else {
+                assert!(state.cancelled);
+                assert!(!state.accepted);
+                assert!(!state.revoke_saw_in_flight);
+            }
+        });
+    }
+
 }
