@@ -853,9 +853,9 @@ impl DurableOperationEvidenceJournal {
             .events()
             .len()
             .checked_add(1)
+            .and_then(|value| value.checked_add(reserved))
             .and_then(|value| value.checked_sub(reserved_event_slots_for_state(current.state)))
             .and_then(|value| value.checked_add(reserved_event_slots_for_state(next_state)))
-            .and_then(|value| value.checked_add(reserved))
             .ok_or(DurableOperationJournalError::CapacityFull)?;
         if required > super::operation_evidence::MAX_OPERATION_EVENTS {
             return Err(DurableOperationJournalError::CapacityFull);
