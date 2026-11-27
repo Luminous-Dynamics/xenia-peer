@@ -194,6 +194,12 @@
       "name": "lease-commit-response-lost",
       "expected": "ReadBackFindsCommittedRange",
       "safety_assertion": "caller_does_not_reserve_a_different_overlapping_range"
+    },
+    {
+      "id": "OWA-028",
+      "name": "two-processes-race-to-reserve-first-lease",
+      "expected": "ExactlyOneLeaseWinner",
+      "safety_assertion": "only_one_initial_range_is_committed"
     }
   ],
   "benchmark_matrix": {
