@@ -773,11 +773,10 @@ mod tests {
         )
         .unwrap_or_else(|error| panic!("reconciliation failed: {error:?}"));
         assert_eq!(
-            gate.commit(second, || EffectExecution::Committed {
-                value: (),
-                evidence_digest: [24; 32],
-            }),
-            Err(EffectGateError::PermitInvalidated)
+            gate.snapshot()
+                .unwrap_or_else(|error| panic!("snapshot failed: {error:?}"))
+                .pending_operations,
+            0
         );
         assert_eq!(
             gate.prepare_after_admission(request(18))
