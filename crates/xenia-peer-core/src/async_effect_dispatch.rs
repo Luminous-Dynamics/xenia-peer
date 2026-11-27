@@ -29,7 +29,7 @@
 //! acknowledgement. This is a local ordering primitive, not an authorization
 //! engine or a durable journal.
 
-use std::collections::HashMap;
+use std::collections::{hash_map::Entry, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -433,16 +433,15 @@ impl TransportDispatchGate {
         if inner.operations.len() >= MAX_ASYNC_DISPATCH_OPERATIONS {
             return Err(DispatchGateError::OperationCapacityFull);
         }
-        if inner.operations.contains_key(&request.operation_id) {
-            return Err(DispatchGateError::DuplicateOperation);
+        match inner.operations.entry(request.operation_id) {
+            Entry::Vacant(entry) => {
+                entry.insert(OperationRecord {
+                    request,
+                    state: OperationState::Prepared,
+                });
+            }
+            Entry::Occupied(_) => return Err(DispatchGateError::DuplicateOperation),
         }
-        inner.operations.insert(
-            request.operation_id,
-            OperationRecord {
-                request,
-                state: OperationState::Prepared,
-            },
-        );
         Ok(DispatchPermit {
             gate_id: self.gate_id,
             inner: Arc::clone(&self.inner),
@@ -651,20 +650,13 @@ impl TransportDispatchGate {
                 OperationState::Prepared => snapshot.prepared_operations += 1,
                 OperationState::InFlight => snapshot.in_flight_operations += 1,
                 OperationState::Unknown { .. } => snapshot.unknown_operations += 1,
-                OperationState::AcceptedByTransport { evidence_digest } => {
-                    let _ = evidence_digest;
+                OperationState::AcceptedByTransport { .. } => {
                     snapshot.accepted_operations += 1;
                 }
                 OperationState::CancelledBeforeDispatch => {
                     snapshot.cancelled_before_dispatch += 1;
                 }
-                OperationState::Reconciled {
-                    original_unknown_digest,
-                    outcome,
-                    receipt_digest,
-                } => {
-                    let _ = (original_unknown_digest, outcome, receipt_digest);
-                }
+                OperationState::Reconciled { .. } => {}
             }
         }
         Ok(snapshot)
@@ -938,4 +930,69 @@ mod tests {
             })
         );
     }
+    #[test]
+    fn revoke_and_begin_dispatch_have_one_linearization_winner() {
+        use std::sync::Barrier;
+        use std::thread;
+
+        for id in 20_u8..52 {
+            let gate = Arc::new(gate());
+            let operation_id = [id; 16];
+            let permit = gate
+                .prepare_after_admission(request(id))
+                .unwrap_or_else(|error| panic!("prepare failed: {error:?}"));
+            let barrier = Arc::new(Barrier::new(3));
+
+            let dispatch_gate = Arc::clone(&gate);
+            let dispatch_barrier = Arc::clone(&barrier);
+            let dispatch = thread::spawn(move || {
+                dispatch_barrier.wait();
+                match dispatch_gate.begin_dispatch(permit) {
+                    Ok(guard) => {
+                        guard
+                            .accepted_by_transport([id.wrapping_add(40); 32])
+                            .unwrap_or_else(|error| panic!("completion failed: {error:?}"));
+                        true
+                    }
+                    Err(DispatchGateError::Revoked) => false,
+                    Err(error) => panic!("unexpected dispatch result: {error:?}"),
+                }
+            });
+
+            let revoke_gate = Arc::clone(&gate);
+            let revoke_barrier = Arc::clone(&barrier);
+            let revoke = thread::spawn(move || {
+                revoke_barrier.wait();
+                revoke_gate
+                    .revoke(8, [id.wrapping_add(60); 32])
+                    .unwrap_or_else(|error| panic!("revoke failed: {error:?}"))
+            });
+
+            barrier.wait();
+            let dispatch_won = dispatch
+                .join()
+                .unwrap_or_else(|_| panic!("dispatch thread panicked"));
+            let revoke_receipt = revoke
+                .join()
+                .unwrap_or_else(|_| panic!("revoke thread panicked"));
+            let was_in_flight_at_revoke = revoke_receipt
+                .in_flight_operations
+                .contains(&operation_id);
+            let snapshot = gate
+                .snapshot()
+                .unwrap_or_else(|error| panic!("snapshot failed: {error:?}"));
+
+            if dispatch_won {
+                assert!(
+                    was_in_flight_at_revoke || snapshot.accepted_operations == 1,
+                    "a pre-revoke dispatch must be either in-flight at revoke or already accepted"
+                );
+            } else {
+                assert!(!was_in_flight_at_revoke);
+                assert_eq!(snapshot.cancelled_before_dispatch, 1);
+                assert_eq!(snapshot.accepted_operations, 0);
+            }
+        }
+    }
+
 }
