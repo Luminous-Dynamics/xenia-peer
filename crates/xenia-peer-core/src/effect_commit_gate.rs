@@ -947,16 +947,10 @@ mod tests {
         // A permit prepared before the UNKNOWN result is invalidated even
         // after reconciliation; callers must obtain a new one under current
         // authority and intent.
-        let old_permit = gate
-            .prepare_after_admission(request(8))
-            .unwrap_err();
+        let old_permit = gate.prepare_after_admission(request(8)).unwrap_err();
         assert_eq!(old_permit, EffectGateError::UnknownOutcomeOutstanding);
         let reconciled = gate
-            .reconcile_unknown(
-                [7; 16],
-                EffectReconciliationOutcome::NotCommitted,
-                [14; 32],
-            )
+            .reconcile_unknown([7; 16], EffectReconciliationOutcome::NotCommitted, [14; 32])
             .unwrap_or_else(|error| panic!("reconciliation failed: {error:?}"));
         assert_eq!(reconciled.original_unknown_digest, [13; 32]);
         assert_eq!(
