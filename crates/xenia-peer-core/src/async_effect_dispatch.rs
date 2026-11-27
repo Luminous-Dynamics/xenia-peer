@@ -181,17 +181,23 @@ impl DispatchGuard {
             .map_err(|_| DispatchGateError::LockPoisoned)?;
         let record = inner
             .operations
-            .get_mut(&self.request.operation_id)
+            .get(&self.request.operation_id)
+            .copied()
             .ok_or(DispatchGateError::OperationNotFound)?;
         if record.request != self.request || !matches!(record.state, OperationState::InFlight) {
             return Err(DispatchGateError::OperationNotInFlight);
         }
-        record.state = match outcome {
+        match outcome {
             TransportDispatchOutcome::AcceptedByTransport => {
-                OperationState::AcceptedByTransport { evidence_digest }
+                inner.operations.remove(&self.request.operation_id);
+                inner.accepted_total = inner.accepted_total.saturating_add(1);
             }
-            TransportDispatchOutcome::Unknown => OperationState::Unknown { evidence_digest },
-        };
+            TransportDispatchOutcome::Unknown => {
+                if let Some(record) = inner.operations.get_mut(&self.request.operation_id) {
+                    record.state = OperationState::Unknown { evidence_digest };
+                }
+            }
+        }
         self.resolved = true;
         Ok(DispatchReceipt {
             operation_id: self.request.operation_id,
@@ -200,6 +206,7 @@ impl DispatchGuard {
             direction: self.request.direction,
             context_digest: self.request.context_digest,
             authority_epoch: self.request.authority_epoch,
+            operation_sequence: self.request.operation_sequence,
             outcome,
             evidence_digest,
         })
