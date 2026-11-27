@@ -1152,8 +1152,19 @@ mod tests {
         wal_head_hash: [u8; 32],
         timestamp: u64,
     ) -> OperationWalCheckpoint {
+        let record_hashes: Vec<[u8; 32]> = (0..wal_sequence)
+            .map(|sequence| [(sequence as u8).wrapping_add(1); 32])
+            .collect();
+        let merkle_root = operation_wal_merkle_root(&record_hashes);
         OperationWalCheckpoint::next(
-            previous, [7; 32], 11, wal_sequence, wal_head_hash, timestamp,
+            previous,
+            [7; 32],
+            11,
+            wal_sequence,
+            wal_head_hash,
+            wal_sequence,
+            merkle_root,
+            timestamp,
         )
         .unwrap_or_else(|error| panic!("checkpoint construction failed: {error:?}"))
     }
@@ -1367,17 +1378,23 @@ mod tests {
     #[test]
     fn local_head_must_equal_latest_witnessed_checkpoint() {
         let checkpoint = checkpoint(None, 10, [10; 32], 100);
-        assert!(verify_local_wal_head(&checkpoint, 10, [10; 32]).is_ok());
+        assert!(verify_local_wal_head(
+            &checkpoint, 10, [10; 32], checkpoint.wal_merkle_root
+        ).is_ok());
         assert!(matches!(
-            verify_local_wal_head(&checkpoint, 9, [9; 32]),
+            verify_local_wal_head(&checkpoint, 9, [9; 32], checkpoint.wal_merkle_root),
             Err(OperationWalAnchorError::LocalWalRollback { .. })
         ));
         assert_eq!(
-            verify_local_wal_head(&checkpoint, 10, [9; 32]),
+            verify_local_wal_head(&checkpoint, 10, [9; 32], checkpoint.wal_merkle_root),
+            Err(OperationWalAnchorError::LocalWalHeadMismatch)
+        );
+        assert_eq!(
+            verify_local_wal_head(&checkpoint, 10, [10; 32], [99; 32]),
             Err(OperationWalAnchorError::LocalWalHeadMismatch)
         );
         assert!(matches!(
-            verify_local_wal_head(&checkpoint, 11, [11; 32]),
+            verify_local_wal_head(&checkpoint, 11, [11; 32], checkpoint.wal_merkle_root),
             Err(OperationWalAnchorError::UnanchoredWalSuffix { .. })
         ));
     }
