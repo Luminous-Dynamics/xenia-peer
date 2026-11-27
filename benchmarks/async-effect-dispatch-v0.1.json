@@ -29,7 +29,9 @@
     "operation_ids_remain_consumed": true,
     "operation_history_is_bounded": true,
     "monotonic_operation_sequence_rejects_replay": true,
-    "completed_dispatches_do_not_consume_outstanding_capacity": true
+    "completed_dispatches_do_not_consume_outstanding_capacity": true,
+    "operation_sequence_high_water_restored_before_resume": true,
+    "outstanding_capacity_bounded_independent_of_lifetime_operations": true
   },
   "scenarios": [
     {
@@ -180,6 +182,33 @@
       "expected": "AnchorMismatch",
       "assert": [
         "old_valid_prefix_rejected_without_external_checkpoint"
+      ]
+    },
+    {
+      "id": "AED-019",
+      "name": "process-restart-restores-sequence-high-water",
+      "expected": "Old-sequence-rejected-new-sequence-admitted",
+      "assert": [
+        "durable_wal_high_water_restored",
+        "old_operation_id_not_reaccepted"
+      ]
+    },
+    {
+      "id": "AED-020",
+      "name": "same-operation-sequence-different-context",
+      "expected": "OperationIdentityMismatch",
+      "assert": [
+        "no_second_permit",
+        "transport_future_not_invoked"
+      ]
+    },
+    {
+      "id": "AED-021",
+      "name": "ten-million-sequential-completions",
+      "expected": "No-outstanding-capacity-exhaustion",
+      "assert": [
+        "active_map_returns_to_zero",
+        "accepted_total_matches_completions"
       ]
     }
   ],
