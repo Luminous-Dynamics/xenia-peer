@@ -1101,7 +1101,7 @@ impl M1RuntimeSession {
         let result = effect();
         let outcome = match &result {
             HostClipboardWriteExecution::Applied => M1ClipboardWriteOutcome::Applied,
-            HostClipboardWriteExecution::NotAttempted(_) => M1ClipboardWriteOutcome::NotAttempted
+            HostClipboardWriteExecution::NotAttempted(_) => M1ClipboardWriteOutcome::NotAttempted,
             HostClipboardWriteExecution::OutcomeUnknown(_) => {
                 M1ClipboardWriteOutcome::OutcomeUnknown
             }
