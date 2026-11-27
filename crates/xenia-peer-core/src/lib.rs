@@ -57,6 +57,7 @@ pub mod frame;
 pub mod handshake;
 pub mod m1_session;
 pub mod operation_wal_anchor;
+pub mod operation_wal_merkle;
 pub mod producer_flow;
 pub mod receive_reservation;
 mod session;
