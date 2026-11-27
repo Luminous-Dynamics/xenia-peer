@@ -465,9 +465,32 @@ impl TransportDispatchGate {
         {
             return Err(DispatchGateError::UnknownOutcomeOutstanding);
         }
-        if inner.operations.len() >= MAX_ASYNC_DISPATCH_OPERATIONS {
+        if inner.operations.contains_key(&request.operation_id) {
+            return Err(DispatchGateError::DuplicateOperation);
+        }
+        if let Some(previous) = inner.last_admitted_sequence
+            && request.operation_sequence <= previous
+        {
+            return Err(DispatchGateError::NonMonotonicOperationSequence {
+                previous,
+                observed: request.operation_sequence,
+            });
+        }
+        let expected_operation_id = derive_dispatch_operation_id(
+            request.session_fingerprint,
+            request.authority_epoch,
+            request.lane,
+            request.direction,
+            request.operation_sequence,
+            request.context_digest,
+        );
+        if request.operation_id != expected_operation_id {
+            return Err(DispatchGateError::OperationIdentityMismatch);
+        }
+        if inner.operations.len() >= MAX_OUTSTANDING_ASYNC_DISPATCHES {
             return Err(DispatchGateError::OperationCapacityFull);
         }
+        inner.last_admitted_sequence = Some(request.operation_sequence);
         match inner.operations.entry(request.operation_id) {
             Entry::Vacant(entry) => {
                 entry.insert(OperationRecord {
