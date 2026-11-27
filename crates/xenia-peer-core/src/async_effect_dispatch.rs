@@ -336,7 +336,7 @@ pub enum DispatchGateError {
     DuplicateOperation,
     /// An UNKNOWN send must be reconciled before a new mutation.
     UnknownOutcomeOutstanding,
-    /// Per-session operation capacity is exhausted.
+    /// Maximum outstanding prepared/in-flight/unknown dispatch capacity is exhausted.
     OperationCapacityFull,
     /// The operation is not present in this gate.
     OperationNotFound,
@@ -786,13 +786,27 @@ mod tests {
     }
 
     fn request(id: u8) -> DispatchRequest {
+        let session_fingerprint = [1; 32];
+        let lane = M1Permission::StreamFrame;
+        let direction = DispatchDirection::HostToViewer;
+        let context_digest = [id.wrapping_add(20); 32];
+        let authority_epoch = 7;
+        let operation_sequence = u64::from(id);
         DispatchRequest {
-            operation_id: [id; 16],
-            session_fingerprint: [1; 32],
-            lane: M1Permission::StreamFrame,
-            direction: DispatchDirection::HostToViewer,
-            context_digest: [id.wrapping_add(20); 32],
-            authority_epoch: 7,
+            operation_id: derive_dispatch_operation_id(
+                session_fingerprint,
+                authority_epoch,
+                lane,
+                direction,
+                operation_sequence,
+                context_digest,
+            ),
+            operation_sequence,
+            session_fingerprint,
+            lane,
+            direction,
+            context_digest,
+            authority_epoch,
         }
     }
 
@@ -844,7 +858,7 @@ mod tests {
         let revoked = gate
             .revoke(8, [9; 32])
             .unwrap_or_else(|error| panic!("revoke failed: {error:?}"));
-        assert_eq!(revoked.in_flight_operations, vec![[3; 16]]);
+        assert_eq!(revoked.in_flight_operations, vec![request(3).operation_id]);
 
         let send_receipt = guard
             .accepted_by_transport([10; 32])
@@ -946,7 +960,7 @@ mod tests {
         let revoked = gate
             .revoke(8, [14; 32])
             .unwrap_or_else(|error| panic!("revoke failed: {error:?}"));
-        assert_eq!(revoked.in_flight_operations, vec![[7; 16]]);
+        assert_eq!(revoked.in_flight_operations, vec![request(7).operation_id]);
         drop(guard);
         assert_eq!(
             gate.reactivate_after_regrant(9, [15; 32]),
@@ -1032,13 +1046,51 @@ mod tests {
     }
 
     #[test]
+    fn completed_dispatches_do_not_consume_outstanding_capacity() {
+        let gate = gate();
+        for id in 1_u64..=10_000 {
+            let context_digest = [id.to_le_bytes()[0]; 32];
+            let operation_id = derive_dispatch_operation_id(
+                [1; 32],
+                7,
+                M1Permission::StreamFrame,
+                DispatchDirection::HostToViewer,
+                id,
+                context_digest,
+            );
+            let request = DispatchRequest {
+                operation_id,
+                operation_sequence: id,
+                session_fingerprint: [1; 32],
+                lane: M1Permission::StreamFrame,
+                direction: DispatchDirection::HostToViewer,
+                context_digest,
+                authority_epoch: 7,
+            };
+            let permit = gate
+                .prepare_after_admission(request)
+                .unwrap_or_else(|error| panic!("prepare {id} failed: {error:?}"));
+            gate.begin_dispatch(permit)
+                .unwrap_or_else(|error| panic!("dispatch {id} failed: {error:?}"))
+                .accepted_by_transport([id.to_le_bytes()[0]; 32])
+                .unwrap_or_else(|error| panic!("completion {id} failed: {error:?}"));
+        }
+        let snapshot = gate
+            .snapshot()
+            .unwrap_or_else(|error| panic!("snapshot failed: {error:?}"));
+        assert_eq!(snapshot.operation_count, 0);
+        assert_eq!(snapshot.accepted_operations, 10_000);
+        assert_eq!(snapshot.unknown_operations, 0);
+    }
+
+    #[test]
     fn revoke_and_begin_dispatch_have_one_linearization_winner() {
         use std::sync::Barrier;
         use std::thread;
 
         for id in 20_u8..52 {
             let gate = Arc::new(gate());
-            let operation_id = [id; 16];
+            let operation_id = request(id).operation_id;
             let permit = gate
                 .prepare_after_admission(request(id))
                 .unwrap_or_else(|error| panic!("prepare failed: {error:?}"));
