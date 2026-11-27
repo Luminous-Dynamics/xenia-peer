@@ -237,6 +237,61 @@ impl OperationWalHeadExtension {
     }
 }
 
+
+/// Proof mode presented to an independent checkpoint witness.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OperationWalCheckpointExtension {
+    /// Linear record-by-record hash-chain proof, retained for small/debug cases.
+    ///
+    /// This mode is rejected when the WAL sequence grows. Growing checkpoints
+    /// must use the compact Merkle consistency proof.
+    LinearHashChain(OperationWalHeadExtension),
+    /// Compact RFC 9162 consistency proof over ordered WAL record hashes.
+    MerkleConsistency(OperationWalMerkleConsistencyProof),
+}
+
+impl OperationWalCheckpointExtension {
+    /// Verify that this proof extends the previous witnessed checkpoint.
+    pub fn verify(
+        &self,
+        previous: Option<&OperationWalCheckpoint>,
+        candidate: &OperationWalCheckpoint,
+    ) -> Result<(), OperationWalAnchorError> {
+        match self {
+            Self::LinearHashChain(extension) => {
+                if let Some(previous) = previous {
+                    if candidate.wal_sequence > previous.wal_sequence {
+                        return Err(OperationWalAnchorError::MerkleConsistencyRequired);
+                    }
+                } else if candidate.wal_sequence > 0 {
+                    return Err(OperationWalAnchorError::MerkleConsistencyRequired);
+                }
+                extension.verify(previous, candidate)
+            }
+            Self::MerkleConsistency(proof) => {
+                validate_checkpoint(candidate)?;
+                if let Some(previous) = previous {
+                    verify_checkpoint_successor(previous, candidate)?;
+                } else if candidate.witness_sequence != 1
+                    || candidate.previous_checkpoint_fingerprint != [0; 32]
+                {
+                    return Err(OperationWalAnchorError::PreviousCheckpointMismatch);
+                }
+                verify_operation_wal_consistency_proof(
+                    previous.map(|value| value.wal_merkle_tree_size).unwrap_or(0),
+                    previous
+                        .map(|value| value.wal_merkle_root)
+                        .unwrap_or_else(|| operation_wal_merkle_root(&[])),
+                    candidate.wal_merkle_tree_size,
+                    candidate.wal_merkle_root,
+                    proof,
+                )
+                .map_err(|_| OperationWalAnchorError::MerkleProofRejected)
+            }
+        }
+    }
+}
+
 /// Independent Ed25519 witness signature over an exact checkpoint or lease.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OperationWalWitnessSignature {
@@ -590,6 +645,18 @@ pub enum OperationWalAnchorError {
     /// Local head hash differs at the witnessed sequence.
     #[error("local operation-WAL head does not match checkpoint")]
     LocalWalHeadMismatch,
+    /// Merkle leaf count does not equal the durable WAL sequence.
+    #[error("operation-WAL Merkle tree size differs from WAL sequence")]
+    MerkleTreeSizeMismatch,
+    /// Empty WAL checkpoint has a non-empty Merkle root.
+    #[error("operation-WAL genesis Merkle root mismatch")]
+    GenesisMerkleRootMismatch,
+    /// A growing checkpoint did not supply a compact Merkle proof.
+    #[error("growing operation-WAL checkpoint requires Merkle consistency proof")]
+    MerkleConsistencyRequired,
+    /// Compact Merkle consistency verification failed.
+    #[error("operation-WAL Merkle consistency proof rejected")]
+    MerkleProofRejected,
     /// Invalid witness trust set or zero/impossible quorum.
     #[error("invalid operation-WAL witness policy")]
     InvalidWitnessPolicy,
@@ -685,7 +752,7 @@ pub trait OperationWalWitnessStore: Send + Sync {
         &self,
         expected_previous_fingerprint: Option<[u8; 32]>,
         candidate: OperationWalCheckpoint,
-        extension: OperationWalHeadExtension,
+        extension: OperationWalCheckpointExtension,
     ) -> Result<OperationWalWitnessBundle, OperationWalWitnessStoreError>;
 
     /// Read the last witnessed sequence lease for this session.
@@ -801,7 +868,8 @@ pub fn verify_checkpoint_successor(
         });
     }
     if candidate.wal_sequence == previous.wal_sequence
-        && candidate.wal_head_hash != previous.wal_head_hash
+        && (candidate.wal_head_hash != previous.wal_head_hash
+            || candidate.wal_merkle_root != previous.wal_merkle_root)
     {
         return Err(OperationWalAnchorError::WalFork { sequence: candidate.wal_sequence });
     }
@@ -829,6 +897,7 @@ pub fn verify_local_wal_head(
     checkpoint: &OperationWalCheckpoint,
     local_sequence: u64,
     local_head_hash: [u8; 32],
+    local_merkle_root: [u8; 32],
 ) -> Result<(), OperationWalAnchorError> {
     validate_checkpoint(checkpoint)?;
     if local_sequence < checkpoint.wal_sequence {
@@ -843,7 +912,9 @@ pub fn verify_local_wal_head(
             local: local_sequence,
         });
     }
-    if local_head_hash != checkpoint.wal_head_hash {
+    if local_head_hash != checkpoint.wal_head_hash
+        || local_merkle_root != checkpoint.wal_merkle_root
+    {
         return Err(OperationWalAnchorError::LocalWalHeadMismatch);
     }
     Ok(())
@@ -1167,7 +1238,7 @@ mod tests {
             &self,
             expected_previous_fingerprint: Option<[u8; 32]>,
             candidate: OperationWalCheckpoint,
-            extension: OperationWalHeadExtension,
+            extension: OperationWalCheckpointExtension,
         ) -> Result<OperationWalWitnessBundle, OperationWalWitnessStoreError> {
             let key = (candidate.session_fingerprint, candidate.clock_domain);
             let mut state = self
