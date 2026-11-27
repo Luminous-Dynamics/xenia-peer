@@ -563,6 +563,7 @@ impl EffectCommitGate {
                 requested: new_epoch,
             });
         }
+        inner.pending_operations.clear();
         inner.authority_epoch = new_epoch;
         Ok(new_epoch)
     }
@@ -845,6 +846,12 @@ mod tests {
             .unwrap_or_else(|error| panic!("permit failed: {error:?}"));
         gate.advance_authority_epoch(8)
             .unwrap_or_else(|error| panic!("epoch advance failed: {error:?}"));
+        assert_eq!(
+            gate.snapshot()
+                .unwrap_or_else(|error| panic!("snapshot failed: {error:?}"))
+                .pending_operations,
+            0
+        );
         assert_eq!(
             gate.commit(permit, || EffectExecution::Committed {
                 value: (),
