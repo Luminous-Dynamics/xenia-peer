@@ -519,6 +519,12 @@ pub enum OperationWalAnchorError {
     /// Invalid witness trust set or zero/impossible quorum.
     #[error("invalid operation-WAL witness policy")]
     InvalidWitnessPolicy,
+    /// A witness public key was malformed.
+    #[error("malformed operation-WAL witness public key")]
+    BadWitnessPublicKey,
+    /// A supplied authority epoch differs from the lease epoch.
+    #[error("operation sequence lease authority epoch mismatch")]
+    AuthorityEpochMismatch,
     /// A witness was not present in the caller-pinned trust set.
     #[error("untrusted operation-WAL witness")]
     UntrustedWitness,
@@ -645,7 +651,7 @@ pub fn operation_wal_checkpoint_fingerprint(
     hasher.update(&checkpoint.witness_sequence.to_be_bytes());
     hasher.update(&checkpoint.previous_checkpoint_fingerprint);
     hasher.update(&checkpoint.timestamp_unix_secs.to_be_bytes());
-    *hasher.finalize().as_bytes().pipe(Ok)
+    Ok(*hasher.finalize().as_bytes())
 }
 
 /// Stable fingerprint of all fields in one sequence lease.
@@ -937,62 +943,6 @@ fn validate_lease(lease: &OperationSequenceLease) -> Result<(), OperationWalAnch
         return Err(OperationWalAnchorError::InvalidLeaseLifetime);
     }
     Ok(())
-}
-
-/// Transport/storage errors from the independent witness authority.
-#[derive(Debug, Clone, PartialEq, Eq, Error)]
-pub enum OperationWalWitnessStoreError {
-    /// Witness service or protected monotonic storage is unavailable.
-    #[error("operation-WAL witness store unavailable")]
-    Unavailable,
-    /// Another actor advanced the head before this compare-and-advance.
-    #[error("operation-WAL witness expected head is stale")]
-    StaleExpectedHead,
-    /// Candidate or extension proof was rejected.
-    #[error("operation-WAL witness candidate rejected")]
-    CandidateRejected,
-    /// Request may have committed; read back witness state before retrying.
-    #[error("operation-WAL witness outcome unknown; reconcile before retry")]
-    UnknownOutcome,
-}
-
-/// Independent monotonic authority for WAL checkpoints and operation leases.
-///
-/// Implementations MUST retain state outside the local WAL's failure domain.
-/// A sidecar in the same directory is not independent. Checkpoint
-/// compare-and-advance MUST atomically compare the expected prior fingerprint,
-/// validate the supplied head extension, and durably store the new checkpoint
-/// before returning signatures. Lease compare-and-advance MUST atomically
-/// reserve a non-overlapping range and persist its high-water mark before
-/// returning signatures. Unknown outcomes must be read back before retry.
-pub trait OperationWalWitnessStore: Send + Sync {
-    /// Read the latest witnessed checkpoint for one session and clock domain.
-    fn latest_checkpoint(
-        &self,
-        session_fingerprint: [u8; 32],
-        clock_domain: u64,
-    ) -> Result<Option<OperationWalWitnessBundle>, OperationWalWitnessStoreError>;
-
-    /// Atomically validate and advance a checkpoint head.
-    fn compare_and_advance_checkpoint(
-        &self,
-        expected_previous_fingerprint: Option<[u8; 32]>,
-        candidate: OperationWalCheckpoint,
-        extension: OperationWalHeadExtension,
-    ) -> Result<OperationWalWitnessBundle, OperationWalWitnessStoreError>;
-
-    /// Read the most recently witnessed sequence lease for one session.
-    fn latest_sequence_lease(
-        &self,
-        session_fingerprint: [u8; 32],
-    ) -> Result<Option<OperationSequenceLeaseBundle>, OperationWalWitnessStoreError>;
-
-    /// Atomically reserve and witness the next non-overlapping sequence range.
-    fn compare_and_advance_sequence_lease(
-        &self,
-        expected_previous_fingerprint: Option<[u8; 32]>,
-        candidate: OperationSequenceLease,
-    ) -> Result<OperationSequenceLeaseBundle, OperationWalWitnessStoreError>;
 }
 
 #[cfg(test)]
