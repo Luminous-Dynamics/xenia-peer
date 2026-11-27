@@ -582,16 +582,25 @@ impl TransportDispatchGate {
             });
         }
         let previous_epoch = inner.authority_epoch;
-        let mut in_flight_operations = Vec::new();
-        for (operation_id, record) in &mut inner.operations {
-            match record.state {
-                OperationState::Prepared => {
-                    record.state = OperationState::CancelledBeforeDispatch;
-                }
-                OperationState::InFlight => in_flight_operations.push(*operation_id),
-                _ => {}
-            }
+        let prepared_operations: Vec<_> = inner
+            .operations
+            .iter()
+            .filter_map(|(operation_id, record)| {
+                matches!(record.state, OperationState::Prepared).then_some(*operation_id)
+            })
+            .collect();
+        for operation_id in prepared_operations {
+            inner.operations.remove(&operation_id);
+            inner.cancelled_before_dispatch_total =
+                inner.cancelled_before_dispatch_total.saturating_add(1);
         }
+        let mut in_flight_operations: Vec<_> = inner
+            .operations
+            .iter()
+            .filter_map(|(operation_id, record)| {
+                matches!(record.state, OperationState::InFlight).then_some(*operation_id)
+            })
+            .collect();
         in_flight_operations.sort_unstable();
         inner.authority_epoch = revoked_epoch;
         inner.phase = GatePhase::Revoked;
