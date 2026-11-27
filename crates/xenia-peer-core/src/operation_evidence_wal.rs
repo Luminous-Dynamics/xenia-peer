@@ -381,6 +381,25 @@ fn reserved_event_slots_for_state(state: OperationState) -> usize {
     }
 }
 
+/// Payload-free candidate head for an independently protected journal checkpoint.
+///
+/// The digest is an unkeyed local WAL-chain head. This value is not itself an
+/// authenticated anchor; callers must persist/authenticate it in a separate
+/// trust domain before relying on it for rollback detection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DurableOperationJournalHead {
+    /// Authenticated session identity bound to the journal.
+    pub session_fingerprint: [u8; 32],
+    /// Monotonic clock domain used by the operation ledger.
+    pub clock_domain: u64,
+    /// Current WAL record sequence.
+    pub journal_sequence: u64,
+    /// BLAKE3 hash-chain digest of the current WAL head.
+    pub wal_chain_digest: [u8; 32],
+    /// Highest admitted operation sequence recovered from the ledger.
+    pub last_operation_sequence: Option<u64>,
+}
+
 /// A durable, single-writer operation journal backed by a framed binary WAL.
 ///
 /// A successful `admit` or `mark_attempted` call returns only after
@@ -778,6 +797,20 @@ impl DurableOperationEvidenceJournal {
     /// Current durable WAL sequence.
     pub fn journal_sequence(&self) -> u64 {
         self.journal_sequence
+    }
+
+    /// Export a payload-free candidate head for an independent anchor service.
+    ///
+    /// A caller must not treat this local unkeyed digest as a trust anchor until
+    /// a separate, rollback-resistant witness has durably accepted it.
+    pub fn head_candidate(&self) -> DurableOperationJournalHead {
+        DurableOperationJournalHead {
+            session_fingerprint: self.session_fingerprint,
+            clock_domain: self.clock_domain,
+            journal_sequence: self.journal_sequence,
+            wal_chain_digest: self.last_record_hash,
+            last_operation_sequence: self.last_operation_sequence,
+        }
     }
 
     /// Whether a failed append has poisoned this in-process writer.
@@ -1391,6 +1424,30 @@ mod tests {
                 OperationState::Admitted
             );
         }
+        cleanup(&path);
+    }
+
+    #[test]
+    fn head_candidate_restores_sequence_and_digest_after_reopen() {
+        let dir = temp_dir();
+        let path = dir.join("session.wal");
+        let session = [15; 32];
+        let first_head = {
+            let mut journal = DurableOperationEvidenceJournal::open(&path, session, 115).unwrap();
+            journal
+                .admit(operation_id(15), 15, context(session), 1, [150; 32])
+                .unwrap();
+            let head = journal.head_candidate();
+            assert_eq!(head.session_fingerprint, session);
+            assert_eq!(head.clock_domain, 115);
+            assert_eq!(head.journal_sequence, journal.journal_sequence());
+            assert_eq!(head.last_operation_sequence, Some(15));
+            assert_ne!(head.wal_chain_digest, [0; 32]);
+            head
+        };
+        let reopened = DurableOperationEvidenceJournal::open(&path, session, 115).unwrap();
+        assert_eq!(reopened.head_candidate(), first_head);
+        drop(reopened);
         cleanup(&path);
     }
 
