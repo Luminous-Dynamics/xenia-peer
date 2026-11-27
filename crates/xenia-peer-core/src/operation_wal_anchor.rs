@@ -456,6 +456,18 @@ impl VerifiedOperationSequenceLease {
         Instant::now() <= self.monotonic_expiry && self.lease.contains(operation_sequence)
     }
 
+    /// Require that an operation sequence belongs to this unexpired lease.
+    pub fn validate_sequence(
+        &self,
+        operation_sequence: u64,
+    ) -> Result<(), OperationWalAnchorError> {
+        if self.contains(operation_sequence) {
+            Ok(())
+        } else {
+            Err(OperationWalAnchorError::OperationSequenceOutsideLease)
+        }
+    }
+
     /// First sequence in the verified lease, inclusive.
     pub fn first_operation_sequence(&self) -> u64 {
         self.lease.first_operation_sequence
