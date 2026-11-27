@@ -1471,9 +1471,12 @@ mod tests {
             .map(|worker| worker.join().unwrap_or_else(|_| panic!("witness worker panicked")))
             .collect();
         let successes = results.iter().filter(|result| result.is_ok()).count();
-        let stale = results.iter().filter(|result| {
-            **result == Err(OperationWalWitnessStoreError::StaleExpectedHead)
-        }).count();
+        let stale = results
+            .iter()
+            .filter(|result| {
+                result.as_ref().err() == Some(&OperationWalWitnessStoreError::StaleExpectedHead)
+            })
+            .count();
         assert_eq!(successes, 1);
         assert_eq!(stale, 1);
         let retained = store
@@ -1501,14 +1504,15 @@ mod tests {
 
         // Simulate a caller that lost the successful response: read back the
         // independently retained lease instead of issuing a different range.
-        let second_bundle = store
+        let _response_lost_after_commit = store
             .compare_and_advance_sequence_lease(Some(previous_fingerprint), second)
             .unwrap_or_else(|error| panic!("second lease advance failed: {error:?}"));
         let retained = store
             .latest_sequence_lease([7; 32])
             .unwrap_or_else(|error| panic!("lease readback failed: {error:?}"))
             .unwrap_or_else(|| panic!("latest lease missing"));
-        assert_eq!(retained, second_bundle);
+        assert_eq!(retained.lease.lease_generation, 2);
+        assert_eq!(retained.lease.previous_lease_fingerprint, previous_fingerprint);
         assert_eq!(retained.lease.first_operation_sequence, 101);
         assert_eq!(retained.lease.last_operation_sequence, 200);
         assert_eq!(
