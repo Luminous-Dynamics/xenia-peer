@@ -911,7 +911,7 @@ mod tests {
         );
         let reconciled = gate
             .reconcile_unknown(
-                [4; 16],
+                request(4).operation_id,
                 DispatchReconciliationOutcome::NotDispatched,
                 [11; 32],
             )
@@ -938,14 +938,14 @@ mod tests {
         );
         let first = gate
             .reconcile_unknown(
-                [6; 16],
+                request(6).operation_id,
                 DispatchReconciliationOutcome::TransportAccepted,
                 [12; 32],
             )
             .unwrap_or_else(|error| panic!("reconciliation failed: {error:?}"));
         assert_eq!(
             gate.reconcile_unknown(
-                [6; 16],
+                request(6).operation_id,
                 DispatchReconciliationOutcome::TransportAccepted,
                 [12; 32],
             )
@@ -954,7 +954,7 @@ mod tests {
         );
         assert_eq!(
             gate.reconcile_unknown(
-                [6; 16],
+                request(6).operation_id,
                 DispatchReconciliationOutcome::NotDispatched,
                 [13; 32],
             ),
@@ -981,7 +981,7 @@ mod tests {
             Err(DispatchGateError::UnknownOutcomeOutstanding)
         );
         gate.reconcile_unknown(
-            [7; 16],
+            request(7).operation_id,
             DispatchReconciliationOutcome::NotDispatched,
             [16; 32],
         )
