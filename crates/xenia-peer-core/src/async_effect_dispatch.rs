@@ -1116,6 +1116,66 @@ mod tests {
     }
 
     #[test]
+    fn outstanding_dispatch_capacity_is_strictly_bounded() {
+        let gate = gate();
+        let mut permits = Vec::with_capacity(MAX_OUTSTANDING_ASYNC_DISPATCHES);
+        for sequence in 1..=MAX_OUTSTANDING_ASYNC_DISPATCHES as u64 {
+            let context_digest = [sequence.to_le_bytes()[0]; 32];
+            let operation_id = derive_dispatch_operation_id(
+                [1; 32],
+                7,
+                M1Permission::StreamFrame,
+                DispatchDirection::HostToViewer,
+                sequence,
+                context_digest,
+            );
+            permits.push(
+                gate.prepare_after_admission(DispatchRequest {
+                    operation_id,
+                    operation_sequence: sequence,
+                    session_fingerprint: [1; 32],
+                    lane: M1Permission::StreamFrame,
+                    direction: DispatchDirection::HostToViewer,
+                    context_digest,
+                    authority_epoch: 7,
+                })
+                .unwrap_or_else(|error| panic!("prepare {sequence} failed: {error:?}")),
+            );
+        }
+        let next_sequence = MAX_OUTSTANDING_ASYNC_DISPATCHES as u64 + 1;
+        let context_digest = [next_sequence.to_le_bytes()[0]; 32];
+        assert_eq!(
+            gate.prepare_after_admission(DispatchRequest {
+                operation_id: derive_dispatch_operation_id(
+                    [1; 32],
+                    7,
+                    M1Permission::StreamFrame,
+                    DispatchDirection::HostToViewer,
+                    next_sequence,
+                    context_digest,
+                ),
+                operation_sequence: next_sequence,
+                session_fingerprint: [1; 32],
+                lane: M1Permission::StreamFrame,
+                direction: DispatchDirection::HostToViewer,
+                context_digest,
+                authority_epoch: 7,
+            })
+            .err(),
+            Some(DispatchGateError::OperationCapacityFull)
+        );
+        drop(permits);
+        let snapshot = gate
+            .snapshot()
+            .unwrap_or_else(|error| panic!("snapshot failed: {error:?}"));
+        assert_eq!(snapshot.operation_count, 0);
+        assert_eq!(
+            snapshot.cancelled_before_dispatch,
+            MAX_OUTSTANDING_ASYNC_DISPATCHES
+        );
+    }
+
+    #[test]
     fn revoke_and_begin_dispatch_have_one_linearization_winner() {
         use std::sync::Barrier;
         use std::thread;
