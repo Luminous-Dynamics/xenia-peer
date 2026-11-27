@@ -930,6 +930,7 @@ mod tests {
             })
         );
     }
+
     #[test]
     fn revoke_and_begin_dispatch_have_one_linearization_winner() {
         use std::sync::Barrier;
