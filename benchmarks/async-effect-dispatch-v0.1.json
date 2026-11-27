@@ -9,7 +9,10 @@
     "live_transport_integration": false,
     "durable_wal_integration": false,
     "authorization_verification": "external_to_gate",
-    "evidence_signatures": "external_to_gate"
+    "evidence_signatures": "external_to_gate",
+    "operation_id_scheme": "BLAKE3-128(session fingerprint || authority epoch || lane || direction || monotonic per-session operation sequence || context digest)",
+    "active_state_retention": "prepared/in-flight/unknown only; accepted and cancelled records leave active map",
+    "reconciliation_cache": "bounded recent cache of 1024; durable WAL is long-term idempotency authority"
   },
   "invariants": {
     "no_gate_mutex_held_across_await": true,
@@ -24,32 +27,182 @@
     "conflicting_reconciliation_fails_closed": true,
     "transport_acceptance_does_not_claim_peer_observation": true,
     "operation_ids_remain_consumed": true,
-    "operation_history_is_bounded": true
+    "operation_history_is_bounded": true,
+    "monotonic_operation_sequence_rejects_replay": true,
+    "completed_dispatches_do_not_consume_outstanding_capacity": true
   },
   "scenarios": [
-    {"id":"AED-001","name":"prepare-drop-before-dispatch","expected":"CancelledBeforeDispatch","assert":["unknown_count_zero","operation_id_still_consumed"]},
-    {"id":"AED-002","name":"revoke-before-begin","expected":"DispatchRejected","assert":["inflight_receipt_empty","transport_future_not_invoked"]},
-    {"id":"AED-003","name":"begin-before-revoke","expected":"PreRevocationInFlight","assert":["revoke_receipt_contains_operation_id","completion_allowed_after_revoke"]},
-    {"id":"AED-004","name":"send-future-dropped","expected":"Unknown","assert":["new_prepare_blocked"]},
-    {"id":"AED-005","name":"send-error-with-ambiguous-write","expected":"Unknown","assert":["new_prepare_blocked","no_automatic_retry"]},
-    {"id":"AED-006","name":"send-api-success","expected":"AcceptedByTransport","assert":["no_peer_observation_claim"]},
-    {"id":"AED-007","name":"identical-reconciliation-replay","expected":"Idempotent","assert":["same_receipt_returned"]},
-    {"id":"AED-008","name":"conflicting-reconciliation","expected":"FailClosed","assert":["receipt_conflict_rejected"]},
-    {"id":"AED-009","name":"regrant-with-inflight-send","expected":"InFlightOutstanding","assert":["reactivation_rejected"]},
-    {"id":"AED-010","name":"regrant-with-unknown-send","expected":"UnknownOutcomeOutstanding","assert":["reactivation_rejected"]},
-    {"id":"AED-011","name":"revoke-begin-race","expected":"ExactlyOneLinearizationOrder","assert":["if_begin_wins_revoke_lists_inflight","if_revoke_wins_begin_rejected"]},
-    {"id":"AED-012","name":"duplicate-operation-id","expected":"DuplicateOperation","assert":["no_second_permit"]},
-    {"id":"AED-013","name":"wrong-session-or-epoch","expected":"AdmissionRejected","assert":["transport_future_not_invoked"]},
-    {"id":"AED-014","name":"operation-capacity-exhausted","expected":"OperationCapacityFull","assert":["no_unbounded_growth"]},
-    {"id":"AED-015","name":"process-crash-after-wal-attempt-before-send","expected":"ConservativeUnknownAfterRecovery","assert":["no_automatic_retry","verified_not_dispatched_can_reconcile"]},
-    {"id":"AED-016","name":"process-crash-after-send-before-owner-receipt","expected":"UnknownAfterRecovery","assert":["no_automatic_retry"]},
-    {"id":"AED-017","name":"process-crash-after-owner-receipt-before-observation","expected":"TransportAcceptedNotPeerObserved","assert":["stage_accuracy_preserved"]},
-    {"id":"AED-018","name":"journal-head-rollback","expected":"AnchorMismatch","assert":["old_valid_prefix_rejected_without_external_checkpoint"]}
+    {
+      "id": "AED-001",
+      "name": "prepare-drop-before-dispatch",
+      "expected": "CancelledBeforeDispatch",
+      "assert": [
+        "unknown_count_zero",
+        "operation_id_still_consumed"
+      ]
+    },
+    {
+      "id": "AED-002",
+      "name": "revoke-before-begin",
+      "expected": "DispatchRejected",
+      "assert": [
+        "inflight_receipt_empty",
+        "transport_future_not_invoked"
+      ]
+    },
+    {
+      "id": "AED-003",
+      "name": "begin-before-revoke",
+      "expected": "PreRevocationInFlight",
+      "assert": [
+        "revoke_receipt_contains_operation_id",
+        "completion_allowed_after_revoke"
+      ]
+    },
+    {
+      "id": "AED-004",
+      "name": "send-future-dropped",
+      "expected": "Unknown",
+      "assert": [
+        "new_prepare_blocked"
+      ]
+    },
+    {
+      "id": "AED-005",
+      "name": "send-error-with-ambiguous-write",
+      "expected": "Unknown",
+      "assert": [
+        "new_prepare_blocked",
+        "no_automatic_retry"
+      ]
+    },
+    {
+      "id": "AED-006",
+      "name": "send-api-success",
+      "expected": "AcceptedByTransport",
+      "assert": [
+        "no_peer_observation_claim"
+      ]
+    },
+    {
+      "id": "AED-007",
+      "name": "identical-reconciliation-replay",
+      "expected": "Idempotent",
+      "assert": [
+        "same_receipt_returned"
+      ]
+    },
+    {
+      "id": "AED-008",
+      "name": "conflicting-reconciliation",
+      "expected": "FailClosed",
+      "assert": [
+        "receipt_conflict_rejected"
+      ]
+    },
+    {
+      "id": "AED-009",
+      "name": "regrant-with-inflight-send",
+      "expected": "InFlightOutstanding",
+      "assert": [
+        "reactivation_rejected"
+      ]
+    },
+    {
+      "id": "AED-010",
+      "name": "regrant-with-unknown-send",
+      "expected": "UnknownOutcomeOutstanding",
+      "assert": [
+        "reactivation_rejected"
+      ]
+    },
+    {
+      "id": "AED-011",
+      "name": "revoke-begin-race",
+      "expected": "ExactlyOneLinearizationOrder",
+      "assert": [
+        "if_begin_wins_revoke_lists_inflight",
+        "if_revoke_wins_begin_rejected"
+      ]
+    },
+    {
+      "id": "AED-012",
+      "name": "duplicate-operation-id",
+      "expected": "DuplicateOperation",
+      "assert": [
+        "no_second_permit"
+      ]
+    },
+    {
+      "id": "AED-013",
+      "name": "wrong-session-or-epoch",
+      "expected": "AdmissionRejected",
+      "assert": [
+        "transport_future_not_invoked"
+      ]
+    },
+    {
+      "id": "AED-014",
+      "name": "operation-capacity-exhausted",
+      "expected": "OperationCapacityFull",
+      "assert": [
+        "no_unbounded_growth"
+      ]
+    },
+    {
+      "id": "AED-015",
+      "name": "process-crash-after-wal-attempt-before-send",
+      "expected": "ConservativeUnknownAfterRecovery",
+      "assert": [
+        "no_automatic_retry",
+        "verified_not_dispatched_can_reconcile"
+      ]
+    },
+    {
+      "id": "AED-016",
+      "name": "process-crash-after-send-before-owner-receipt",
+      "expected": "UnknownAfterRecovery",
+      "assert": [
+        "no_automatic_retry"
+      ]
+    },
+    {
+      "id": "AED-017",
+      "name": "process-crash-after-owner-receipt-before-observation",
+      "expected": "TransportAcceptedNotPeerObserved",
+      "assert": [
+        "stage_accuracy_preserved"
+      ]
+    },
+    {
+      "id": "AED-018",
+      "name": "journal-head-rollback",
+      "expected": "AnchorMismatch",
+      "assert": [
+        "old_valid_prefix_rejected_without_external_checkpoint"
+      ]
+    }
   ],
   "benchmark_matrix": {
-    "concurrency_levels": [1, 8, 32, 128],
-    "operation_counts": [10000, 100000, 1000000],
-    "workloads": ["frame-60fps", "telemetry-10hz", "audio-50fps", "file-chunk-serial", "mixed-lanes"],
+    "concurrency_levels": [
+      1,
+      8,
+      32,
+      128
+    ],
+    "operation_counts": [
+      10000,
+      100000,
+      1000000,
+      10000000
+    ],
+    "workloads": [
+      "frame-60fps",
+      "telemetry-10hz",
+      "audio-50fps",
+      "file-chunk-serial",
+      "mixed-lanes"
+    ],
     "baselines": [
       "no-gate-direct-transport",
       "tokio-mutex-held-across-send-future",
@@ -73,7 +226,9 @@
     "unauthorized_post_revoke_dispatches": 0,
     "automatic_retries_of_unknown_operations": 0,
     "duplicate_operation_admissions": 0,
-    "lost_inflight_operations_in_revoke_receipt": 0
+    "lost_inflight_operations_in_revoke_receipt": 0,
+    "max_outstanding_dispatches": 4096,
+    "sequential_operations_without_capacity_exhaustion": 10000000
   },
   "measurement_requirements": {
     "record_cpu_model_and_microcode": true,
