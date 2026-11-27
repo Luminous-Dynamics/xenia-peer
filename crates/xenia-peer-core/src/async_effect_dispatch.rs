@@ -1269,6 +1269,7 @@ mod tests {
     #[test]
     fn loom_exhaustively_checks_dispatch_revoke_and_completion_order() {
         loom::model(|| {
+            use loom::sync::mpsc;
             use loom::sync::{Arc, Mutex};
             use loom::thread;
 
@@ -1287,29 +1288,41 @@ mod tests {
                 prepared: true,
                 ..ModelState::default()
             }));
+            let (completion_tx, completion_rx) = mpsc::channel();
 
             let dispatch_state = Arc::clone(&state);
             let dispatch = thread::spawn(move || {
-                let mut state = dispatch_state
-                    .lock()
-                    .unwrap_or_else(|_| panic!("model lock poisoned"));
-                if state.active && state.prepared {
-                    state.prepared = false;
-                    state.in_flight = true;
-                    true
-                } else {
-                    false
-                }
+                let admitted = {
+                    let mut state = dispatch_state
+                        .lock()
+                        .unwrap_or_else(|_| panic!("model lock poisoned"));
+                    if state.active && state.prepared {
+                        state.prepared = false;
+                        state.in_flight = true;
+                        true
+                    } else {
+                        false
+                    }
+                };
+                completion_tx
+                    .send(admitted)
+                    .unwrap_or_else(|_| panic!("completion signal failed"));
+                admitted
             });
 
             let finish_state = Arc::clone(&state);
             let finish = thread::spawn(move || {
-                let mut state = finish_state
-                    .lock()
-                    .unwrap_or_else(|_| panic!("model lock poisoned"));
-                if state.in_flight {
-                    state.in_flight = false;
-                    state.accepted = true;
+                let admitted = completion_rx
+                    .recv()
+                    .unwrap_or_else(|_| panic!("dispatch completion signal missing"));
+                if admitted {
+                    let mut state = finish_state
+                        .lock()
+                        .unwrap_or_else(|_| panic!("model lock poisoned"));
+                    if state.in_flight {
+                        state.in_flight = false;
+                        state.accepted = true;
+                    }
                 }
             });
 
@@ -1331,11 +1344,9 @@ mod tests {
             let dispatch_admitted = dispatch
                 .join()
                 .unwrap_or_else(|_| panic!("model dispatch thread panicked"));
-            finish
-                .join()
+            finish.join()
                 .unwrap_or_else(|_| panic!("model finish thread panicked"));
-            revoke
-                .join()
+            revoke.join()
                 .unwrap_or_else(|_| panic!("model revoke thread panicked"));
 
             let state = state
