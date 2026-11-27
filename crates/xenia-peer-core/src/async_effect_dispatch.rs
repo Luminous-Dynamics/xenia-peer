@@ -86,14 +86,19 @@ impl Drop for DispatchPermit {
         if self.consumed {
             return;
         }
-        if let Ok(mut inner) = self.inner.lock()
-            && let Some(record) = inner.operations.get_mut(&self.request.operation_id)
-            && record.request == self.request
-            && matches!(record.state, OperationState::Prepared)
-        {
-            // A permit dropped before begin_dispatch is definitively not
-            // dispatched. Keep its operation ID consumed.
-            record.state = OperationState::CancelledBeforeDispatch;
+        if let Ok(mut inner) = self.inner.lock() {
+            let is_prepared = inner
+                .operations
+                .get(&self.request.operation_id)
+                .is_some_and(|record| {
+                    record.request == self.request
+                        && matches!(record.state, OperationState::Prepared)
+                });
+            if is_prepared {
+                inner.operations.remove(&self.request.operation_id);
+                inner.cancelled_before_dispatch_total =
+                    inner.cancelled_before_dispatch_total.saturating_add(1);
+            }
         }
     }
 }
@@ -696,6 +701,43 @@ impl TransportDispatchGate {
     }
 }
 
+/// Derive the stable operation ID from a monotonic session sequence and
+/// the exact authenticated operation context. The sequence must not reset
+/// across rekey or regrant. Long-term duplicate history remains the WAL's job.
+pub fn derive_dispatch_operation_id(
+    session_fingerprint: [u8; 32],
+    authority_epoch: u64,
+    lane: M1Permission,
+    direction: DispatchDirection,
+    operation_sequence: u64,
+    context_digest: [u8; 32],
+) -> [u8; 16] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"XENIA-ASYNC-DISPATCH-OPERATION-V1\0");
+    hasher.update(&session_fingerprint);
+    hasher.update(&authority_epoch.to_le_bytes());
+    hasher.update(&[dispatch_permission_tag(lane), direction as u8]);
+    hasher.update(&operation_sequence.to_le_bytes());
+    hasher.update(&context_digest);
+    let digest = hasher.finalize();
+    let mut operation_id = [0; 16];
+    operation_id.copy_from_slice(&digest.as_bytes()[..16]);
+    operation_id
+}
+
+fn dispatch_permission_tag(permission: M1Permission) -> u8 {
+    match permission {
+        M1Permission::StreamFrame => 1,
+        M1Permission::StreamTelemetry => 2,
+        M1Permission::StreamAudio => 3,
+        M1Permission::InjectInput => 4,
+        M1Permission::ReadHostClipboard => 5,
+        M1Permission::WriteHostClipboard => 6,
+        M1Permission::SendFileToViewer => 7,
+        M1Permission::ReceiveFileFromViewer => 8,
+    }
+}
+
 fn abandoned_guard_digest(request: &DispatchRequest) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"XENIA-ASYNC-DISPATCH-GUARD-DROPPED-V1\0");
@@ -703,6 +745,7 @@ fn abandoned_guard_digest(request: &DispatchRequest) -> [u8; 32] {
     hasher.update(&request.session_fingerprint);
     hasher.update(&request.context_digest);
     hasher.update(&request.authority_epoch.to_le_bytes());
+    hasher.update(&request.operation_sequence.to_le_bytes());
     *hasher.finalize().as_bytes()
 }
 
