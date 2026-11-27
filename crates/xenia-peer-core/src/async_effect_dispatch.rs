@@ -29,7 +29,7 @@
 //! acknowledgement. This is a local ordering primitive, not an authorization
 //! engine or a durable journal.
 
-use std::collections::{hash_map::Entry, HashMap};
+use std::collections::{HashMap, hash_map::Entry};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -142,7 +142,10 @@ impl DispatchGuard {
         mut self,
         evidence_digest: [u8; 32],
     ) -> Result<DispatchReceipt, DispatchGateError> {
-        self.finish(TransportDispatchOutcome::AcceptedByTransport, evidence_digest)
+        self.finish(
+            TransportDispatchOutcome::AcceptedByTransport,
+            evidence_digest,
+        )
     }
 
     /// Record an ambiguous transport result.
@@ -161,7 +164,10 @@ impl DispatchGuard {
         outcome: TransportDispatchOutcome,
         evidence_digest: [u8; 32],
     ) -> Result<DispatchReceipt, DispatchGateError> {
-        let mut inner = self.inner.lock().map_err(|_| DispatchGateError::LockPoisoned)?;
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| DispatchGateError::LockPoisoned)?;
         let record = inner
             .operations
             .get_mut(&self.request.operation_id)
@@ -480,8 +486,7 @@ impl TransportDispatchGate {
             .operations
             .get_mut(&permit.request.operation_id)
             .ok_or(DispatchGateError::OperationNotFound)?;
-        if record.request != permit.request || !matches!(record.state, OperationState::Prepared)
-        {
+        if record.request != permit.request || !matches!(record.state, OperationState::Prepared) {
             return Err(DispatchGateError::OperationNotInFlight);
         }
         record.state = OperationState::InFlight;
@@ -582,9 +587,7 @@ impl TransportDispatchGate {
                     receipt_digest,
                 })
             }
-            OperationState::Reconciled { .. } => {
-                Err(DispatchGateError::ReconciliationConflict)
-            }
+            OperationState::Reconciled { .. } => Err(DispatchGateError::ReconciliationConflict),
             _ => Err(DispatchGateError::UnknownOperationNotFound),
         }
     }
@@ -791,7 +794,10 @@ mod tests {
                 [11; 32],
             )
             .unwrap_or_else(|error| panic!("reconciliation failed: {error:?}"));
-        assert_eq!(reconciled.outcome, DispatchReconciliationOutcome::NotDispatched);
+        assert_eq!(
+            reconciled.outcome,
+            DispatchReconciliationOutcome::NotDispatched
+        );
         assert!(
             gate.prepare_after_admission(request(5)).is_ok(),
             "verified reconciliation should release the admission fence"
@@ -976,9 +982,8 @@ mod tests {
             let revoke_receipt = revoke
                 .join()
                 .unwrap_or_else(|_| panic!("revoke thread panicked"));
-            let was_in_flight_at_revoke = revoke_receipt
-                .in_flight_operations
-                .contains(&operation_id);
+            let was_in_flight_at_revoke =
+                revoke_receipt.in_flight_operations.contains(&operation_id);
             let snapshot = gate
                 .snapshot()
                 .unwrap_or_else(|error| panic!("snapshot failed: {error:?}"));
@@ -995,5 +1000,4 @@ mod tests {
             }
         }
     }
-
 }
