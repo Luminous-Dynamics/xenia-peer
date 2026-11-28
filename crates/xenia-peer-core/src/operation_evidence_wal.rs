@@ -779,6 +779,16 @@ impl DurableOperationEvidenceJournal {
         self.ledger.snapshot(operation_id).map_err(Into::into)
     }
 
+    /// Return a complete, deterministic snapshot of all recovered operations.
+    ///
+    /// Results are ordered by operation sequence and include only payload-free
+    /// operation context and lifecycle state. This is the source for building
+    /// dispatch recovery projections; callers must validate operation IDs and
+    /// current authority epochs before granting any resumed permit.
+    pub fn snapshots(&self) -> Vec<OperationSnapshot> {
+        self.ledger.snapshots()
+    }
+
     /// Read the in-memory view of the fully replayed operation event chain.
     pub fn events(&self) -> &[OperationEvidenceEvent] {
         self.ledger.events()
@@ -1363,6 +1373,51 @@ mod tests {
             );
             assert_eq!(journal.journal_sequence(), 3);
             assert!(journal.verify_operation_chain());
+        }
+        cleanup(&path);
+    }
+
+    #[test]
+    fn snapshots_are_complete_ordered_and_survive_restart() {
+        let dir = temp_dir();
+        fs::create_dir_all(&dir).unwrap_or_else(|error| panic!("mkdir failed: {error}"));
+        let path = dir.join("snapshots.wal");
+        let session = [9; 32];
+        let first_id = operation_id(1);
+        let second_id = operation_id(2);
+        {
+            let mut journal = DurableOperationEvidenceJournal::open(&path, session, 17)
+                .unwrap_or_else(|error| panic!("open failed: {error:?}"));
+            journal
+                .admit(first_id, 1, context(session), 1, [11; 32])
+                .unwrap_or_else(|error| panic!("first admission failed: {error:?}"));
+            journal
+                .admit(second_id, 2, context(session), 2, [12; 32])
+                .unwrap_or_else(|error| panic!("second admission failed: {error:?}"));
+            journal
+                .mark_attempted(second_id, 3, [13; 32])
+                .unwrap_or_else(|error| panic!("attempt failed: {error:?}"));
+            journal
+                .mark_unknown(second_id, 4, [14; 32])
+                .unwrap_or_else(|error| panic!("unknown failed: {error:?}"));
+            let snapshots = journal.snapshots();
+            assert_eq!(snapshots.len(), 2);
+            assert_eq!(snapshots[0].operation_id, first_id);
+            assert_eq!(snapshots[0].operation_sequence, 1);
+            assert_eq!(snapshots[0].state, OperationState::Admitted);
+            assert_eq!(snapshots[1].operation_id, second_id);
+            assert_eq!(snapshots[1].operation_sequence, 2);
+            assert_eq!(snapshots[1].state, OperationState::Unknown);
+        }
+        {
+            let journal = DurableOperationEvidenceJournal::open(&path, session, 17)
+                .unwrap_or_else(|error| panic!("reopen failed: {error:?}"));
+            let snapshots = journal.snapshots();
+            assert_eq!(snapshots.len(), 2);
+            assert_eq!(snapshots[0].operation_id, first_id);
+            assert_eq!(snapshots[0].state, OperationState::Admitted);
+            assert_eq!(snapshots[1].operation_id, second_id);
+            assert_eq!(snapshots[1].state, OperationState::Unknown);
         }
         cleanup(&path);
     }
