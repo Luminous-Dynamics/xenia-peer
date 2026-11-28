@@ -242,6 +242,46 @@ mod tests {
     }
 
     #[test]
+    fn canonical_checkpoint_matches_shared_cross_language_golden_vector() {
+        const FIXTURE: &str =
+            include_str!("../../../fixtures/xenia-myclix-checkpoint-v1.kat");
+        let expected = FIXTURE
+            .lines()
+            .find_map(|line| line.strip_prefix("payload_hex="))
+            .unwrap_or_else(|| panic!("golden payload hex missing"));
+        let checkpoint = XeniaJournalCheckpointV1 {
+            journal_scope_commitment: [0x11; 32],
+            clock_domain: 0x0102_0304_0506_0708,
+            authority_epoch: 0x1112_1314_1516_1718,
+            policy_digest: [0x22; 32],
+            journal_sequence: 0x2122_2324_2526_2728,
+            wal_chain_digest: [0x33; 32],
+            operation_chain_digest: [0x44; 32],
+            last_operation_sequence: Some(0x3132_3334_3536_3738),
+            operation_event_count: 0x4142_4344_4546_4748,
+            state_counts: OperationEvidenceStateCounts {
+                admitted: 0x51,
+                attempted: 0x52,
+                committed: 0x53,
+                observed: 0x54,
+                rejected: 0x55,
+                not_committed: 0x56,
+                unknown: 0x57,
+                reconciled_not_committed: 0x58,
+                reconciled_committed: 0x59,
+                reconciled_observed: 0x5A,
+            },
+        };
+        let actual = checkpoint
+            .canonical_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        assert_eq!(actual, expected);
+        assert_eq!(checkpoint.canonical_bytes().len(), 297);
+    }
+
+    #[test]
     fn checkpoint_is_deterministic_and_redacts_raw_session_fingerprint() {
         let path = journal_path();
         let session = [0xA1; 32];
