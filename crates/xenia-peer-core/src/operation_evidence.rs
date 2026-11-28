@@ -214,6 +214,58 @@ pub struct OperationSnapshot {
     pub reconciliation_digest: Option<[u8; 32]>,
 }
 
+/// Aggregate lifecycle counts for a bounded operation-evidence ledger.
+///
+/// These counts expose state without exporting operation IDs, resource labels,
+/// raw clipboard data, input payloads, or other sensitive operation context.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct OperationEvidenceStateCounts {
+    /// Operations admitted but not yet attempted.
+    pub admitted: u64,
+    /// Operations whose effect owner was invoked but has no terminal result.
+    pub attempted: u64,
+    /// Operations committed by the local effect owner.
+    pub committed: u64,
+    /// Operations observed at a stronger layer.
+    pub observed: u64,
+    /// Operations rejected before effect attempt.
+    pub rejected: u64,
+    /// Operations the effect owner confirms did not commit.
+    pub not_committed: u64,
+    /// Operations whose effect outcome remains ambiguous.
+    pub unknown: u64,
+    /// Unknown operations reconciled as not committed.
+    pub reconciled_not_committed: u64,
+    /// Unknown operations reconciled as locally committed.
+    pub reconciled_committed: u64,
+    /// Unknown operations reconciled with an independent observation.
+    pub reconciled_observed: u64,
+}
+
+impl OperationEvidenceStateCounts {
+    /// Operations that still block a claim of a fully resolved lifecycle.
+    ///
+    /// Committed is not counted as pending local mutation; it can still await
+    /// a stronger observer, which is represented separately by committed.
+    pub fn pending_effects(self) -> u64 {
+        self.admitted.saturating_add(self.attempted).saturating_add(self.unknown)
+    }
+
+    /// Total distinct operation records represented by this snapshot.
+    pub fn total(self) -> u64 {
+        self.admitted
+            .saturating_add(self.attempted)
+            .saturating_add(self.committed)
+            .saturating_add(self.observed)
+            .saturating_add(self.rejected)
+            .saturating_add(self.not_committed)
+            .saturating_add(self.unknown)
+            .saturating_add(self.reconciled_not_committed)
+            .saturating_add(self.reconciled_committed)
+            .saturating_add(self.reconciled_observed)
+    }
+}
+
 /// Result of admitting an operation ID.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AdmissionResult {
@@ -551,6 +603,26 @@ impl OperationEvidenceLedger {
     /// Read the append-only event sequence.
     pub fn events(&self) -> &[OperationEvidenceEvent] {
         &self.events
+    }
+
+    /// Return payload-free counts derived from the current operation records.
+    pub fn state_counts(&self) -> OperationEvidenceStateCounts {
+        let mut counts = OperationEvidenceStateCounts::default();
+        for record in self.records.values() {
+            match record.state {
+                OperationState::Admitted => counts.admitted = counts.admitted.saturating_add(1),
+                OperationState::Attempted => counts.attempted = counts.attempted.saturating_add(1),
+                OperationState::Committed => counts.committed = counts.committed.saturating_add(1),
+                OperationState::Observed => counts.observed = counts.observed.saturating_add(1),
+                OperationState::Rejected => counts.rejected = counts.rejected.saturating_add(1),
+                OperationState::NotCommitted => counts.not_committed = counts.not_committed.saturating_add(1),
+                OperationState::Unknown => counts.unknown = counts.unknown.saturating_add(1),
+                OperationState::ReconciledNotCommitted => counts.reconciled_not_committed = counts.reconciled_not_committed.saturating_add(1),
+                OperationState::ReconciledCommitted => counts.reconciled_committed = counts.reconciled_committed.saturating_add(1),
+                OperationState::ReconciledObserved => counts.reconciled_observed = counts.reconciled_observed.saturating_add(1),
+            }
+        }
+        counts
     }
 
     /// Current chain digest for external binding/export.
