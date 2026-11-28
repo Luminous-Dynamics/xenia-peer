@@ -24,8 +24,8 @@ use serde::{Deserialize, Serialize};
 use crate::m1_session::M1Permission;
 use crate::operation_evidence::{
     AdmissionResult, OperationContext, OperationDirection, OperationEvidenceError,
-    OperationEvidenceEvent, OperationEvidenceLedger, OperationId, OperationSnapshot,
-    OperationState, ReconciliationOutcome,
+    OperationEvidenceEvent, OperationEvidenceLedger, OperationEvidenceStateCounts, OperationId,
+    OperationSnapshot, OperationState, ReconciliationOutcome,
 };
 
 /// Durable WAL schema version. A future incompatible record layout must bump it.
@@ -114,12 +114,18 @@ impl fmt::Display for DurableOperationJournalError {
                 "operation WAL clock regressed from {previous} to {observed}"
             ),
             Self::SequenceExhausted => write!(f, "operation WAL sequence is exhausted"),
-            Self::JournalBehindAnchor { anchored_sequence, recovered_sequence } => write!(
+            Self::JournalBehindAnchor {
+                anchored_sequence,
+                recovered_sequence,
+            } => write!(
                 f,
                 "operation WAL is behind anchor sequence {anchored_sequence} (recovered {recovered_sequence})"
             ),
             Self::JournalAnchorPrefixMismatch { sequence } => {
-                write!(f, "operation WAL does not match the trusted anchor at sequence {sequence}")
+                write!(
+                    f,
+                    "operation WAL does not match the trusted anchor at sequence {sequence}"
+                )
             }
             Self::ReplayDivergence => {
                 write!(
@@ -813,6 +819,11 @@ impl DurableOperationEvidenceJournal {
         self.ledger.events()
     }
 
+    /// Return payload-free counts from the fully replayed operation records.
+    pub fn state_counts(&self) -> OperationEvidenceStateCounts {
+        self.ledger.state_counts()
+    }
+
     /// Hash-chain root for the operation stage ledger.
     pub fn operation_chain_digest(&self) -> [u8; 32] {
         self.ledger.chain_digest()
@@ -861,11 +872,12 @@ impl DurableOperationEvidenceJournal {
                 recovered_sequence: self.journal_sequence,
             });
         }
-        let index = usize::try_from(anchor.journal_sequence)
-            .map_err(|_| DurableOperationJournalError::JournalBehindAnchor {
+        let index = usize::try_from(anchor.journal_sequence).map_err(|_| {
+            DurableOperationJournalError::JournalBehindAnchor {
                 anchored_sequence: anchor.journal_sequence,
                 recovered_sequence: self.journal_sequence,
-            })?;
+            }
+        })?;
         let Some(prefix) = self.prefix_heads.get(index) else {
             return Err(DurableOperationJournalError::JournalBehindAnchor {
                 anchored_sequence: anchor.journal_sequence,

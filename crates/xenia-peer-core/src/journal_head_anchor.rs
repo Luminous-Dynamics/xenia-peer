@@ -24,8 +24,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use crate::operation_evidence_wal::{
-    DurableOperationEvidenceJournal, DurableOperationJournalError,
-    DurableOperationJournalHead,
+    DurableOperationEvidenceJournal, DurableOperationJournalError, DurableOperationJournalHead,
 };
 
 /// A versioned checkpoint committed by an independent journal-head witness.
@@ -165,11 +164,8 @@ pub fn verify_journal_head<W: JournalHeadWitness>(
                 generation: 1,
                 head: candidate,
             };
-            let stored = witness.compare_and_swap(
-                candidate.session_fingerprint,
-                None,
-                checkpoint,
-            )?;
+            let stored =
+                witness.compare_and_swap(candidate.session_fingerprint, None, checkpoint)?;
             Ok((JournalHeadVerification::InitializedEmptyJournal, stored))
         }
         Some(checkpoint) => {
@@ -222,11 +218,11 @@ pub fn advance_checkpoint_after_external_verification<W: JournalHeadWitness>(
     expected_generation: u64,
 ) -> Result<JournalHeadAdvanceReceipt, JournalHeadAnchorError> {
     let candidate = journal.head_candidate();
-    let previous = witness
-        .load(candidate.session_fingerprint)?
-        .ok_or(JournalHeadAnchorError::MissingCheckpointForNonemptyJournal {
+    let previous = witness.load(candidate.session_fingerprint)?.ok_or(
+        JournalHeadAnchorError::MissingCheckpointForNonemptyJournal {
             recovered_sequence: candidate.journal_sequence,
-        })?;
+        },
+    )?;
     if previous.generation != expected_generation {
         return Err(JournalHeadAnchorError::Witness(
             JournalHeadWitnessError::CompareAndSwapConflict,
@@ -267,6 +263,11 @@ pub fn advance_checkpoint_after_external_verification<W: JournalHeadWitness>(
     Ok(JournalHeadAdvanceReceipt { previous, current })
 }
 
+/// In-memory witness test double.
+///
+/// This mock exists only to exercise the witness protocol's state transitions.
+/// It is not durable, independently administered, rollback-resistant, or
+/// suitable for production trust anchoring.
 #[cfg(test)]
 #[derive(Clone, Default)]
 pub struct MemoryJournalHeadWitness {
@@ -396,9 +397,11 @@ mod tests {
         let witness = MemoryJournalHeadWitness::default();
         assert!(matches!(
             verify_journal_head(&journal, &witness),
-            Err(JournalHeadAnchorError::MissingCheckpointForNonemptyJournal {
-                recovered_sequence: 1
-            })
+            Err(
+                JournalHeadAnchorError::MissingCheckpointForNonemptyJournal {
+                    recovered_sequence: 1
+                }
+            )
         ));
         drop(journal);
         remove_journal(&path);
@@ -423,12 +426,9 @@ mod tests {
                 recovered_sequence: 1
             })
         ));
-        let advanced = advance_checkpoint_after_external_verification(
-            &journal,
-            &witness,
-            genesis.generation,
-        )
-        .unwrap_or_else(|error| panic!("checkpoint advance failed: {error:?}"));
+        let advanced =
+            advance_checkpoint_after_external_verification(&journal, &witness, genesis.generation)
+                .unwrap_or_else(|error| panic!("checkpoint advance failed: {error:?}"));
         assert_eq!(advanced.current.generation, 2);
         assert_eq!(advanced.current.head, journal.head_candidate());
         let (status, current) = verify_journal_head(&journal, &witness)
@@ -459,8 +459,8 @@ mod tests {
                 genesis.generation,
             )
             .unwrap_or_else(|error| panic!("first advance failed: {error:?}"));
-            prefix_bytes = fs::read(&path)
-                .unwrap_or_else(|error| panic!("prefix read failed: {error:?}"));
+            prefix_bytes =
+                fs::read(&path).unwrap_or_else(|error| panic!("prefix read failed: {error:?}"));
             journal
                 .admit(OperationId([4; 16]), 2, context(session, 4), 2, [7; 32])
                 .unwrap_or_else(|error| panic!("second admission failed: {error:?}"));
@@ -597,7 +597,11 @@ mod tests {
         barrier.wait();
         let results: Vec<_> = handles
             .into_iter()
-            .map(|handle| handle.join().unwrap_or_else(|_| panic!("CAS thread panicked")))
+            .map(|handle| {
+                handle
+                    .join()
+                    .unwrap_or_else(|_| panic!("CAS thread panicked"))
+            })
             .collect();
         assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
         assert_eq!(
@@ -635,10 +639,11 @@ mod tests {
             .unwrap_or_else(|error| panic!("open failed: {error:?}"));
         assert!(matches!(
             verify_journal_head(&journal, &Unavailable),
-            Err(JournalHeadAnchorError::Witness(JournalHeadWitnessError::Unavailable))
+            Err(JournalHeadAnchorError::Witness(
+                JournalHeadWitnessError::Unavailable
+            ))
         ));
         drop(journal);
         remove_journal(&path);
     }
-
 }

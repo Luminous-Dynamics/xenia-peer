@@ -55,15 +55,16 @@ pub mod advertisement;
 pub mod file_transfer;
 pub mod frame;
 pub mod handshake;
+pub mod journal_head_anchor;
 pub mod m1_session;
 pub mod operation_evidence;
 pub mod operation_evidence_wal;
-pub mod journal_head_anchor;
 pub mod producer_flow;
 pub mod receive_reservation;
 mod session;
 pub mod transfer_source;
 pub mod transport;
+pub mod xenia_checkpoint_interop;
 
 pub use file_transfer::{
     IncomingFileStageError, IncomingFileStager, cleanup_orphaned_receive_staging,
