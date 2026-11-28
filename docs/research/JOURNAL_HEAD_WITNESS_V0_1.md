@@ -68,6 +68,20 @@ A local attacker who can rewrite the WAL can construct a new internally consiste
 
 This PR deliberately returns UnanchoredSuffix instead. The external verifier must decide whether the new records are justified by authenticated owner/observer receipts and only then ask the witness to persist the new head. A production witness should make the checkpoint update a durable compare-and-swap and bind the authenticated principal, session, previous generation, and new head.
 
+## Risk-tiered checkpoint cadence (research direction)
+
+A remote witness round trip on every 60 fps video frame or audio packet would likely dominate the media path. It is not a sensible universal design target. The checkpoint cadence should be selected by effect risk and receiver capabilities:
+
+| Class | Examples | Candidate anchor policy | Required caveat |
+|---|---|---|---|
+| High-risk local mutation/disclosure | Input injection, host clipboard read/write, file publication, privilege changes | Anchor admission and attempt before invoking the effect owner; anchor a terminal stage only after owner-receipt verification | Witness availability blocks the new mutation |
+| High-volume stream | Video frames, audio packets, routine telemetry | Short-lived, signed stream lease that commits a monotonic sequence range and a batch root before the first send; periodic witnessed range advancement | Receiver must enforce sequence/dedup, and crash inside the range leaves unresolved work UNKNOWN |
+| Control/authority plane | M1 consent, rekey, revocation, scope changes | Per-transition checkpoint; invalidate prior leases and epochs | No stale lease may admit a new operation after the revocation linearization point |
+
+The batch/lease approach is a research candidate, not implemented here. It is only safe if the remote receiver durably remembers the accepted sequence high-water (or a deduplication window), the lease is scoped to exact session/epoch/lane/direction/resource context, and the entire bounded range is committed before sending. A batch commitment cannot be used to pretend every frame was received or rendered. If receiver-side deduplication is unavailable, use the stricter per-operation path or retain the stream as at-least-once/UNKNOWN on recovery.
+
+This creates a measurable optimization problem: minimize witness round trips while bounding the maximum unanchored effect window and preserving zero silent retries.
+
 ## Witness implementation requirements
 
 A production JournalHeadWitness must:
