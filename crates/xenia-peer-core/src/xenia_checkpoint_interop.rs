@@ -61,6 +61,26 @@ pub struct XeniaJournalCheckpointV1 {
     pub state_counts: OperationEvidenceStateCounts,
 }
 
+/// Failure to construct an exportable checkpoint from the current WAL.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum XeniaCheckpointBuildError {
+    /// A failed append poisoned the current journal writer.
+    JournalPoisoned,
+    /// The semantic operation-stage chain failed its integrity check.
+    OperationChainInvalid,
+}
+
+impl std::fmt::Display for XeniaCheckpointBuildError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::JournalPoisoned => write!(f, "operation WAL writer is poisoned"),
+            Self::OperationChainInvalid => write!(f, "operation evidence chain is invalid"),
+        }
+    }
+}
+
+impl std::error::Error for XeniaCheckpointBuildError {}
+
 impl XeniaJournalCheckpointV1 {
     /// Build a payload from a fully replayed WAL.
     ///
@@ -73,9 +93,15 @@ impl XeniaJournalCheckpointV1 {
         scope_key: &[u8; 32],
         authority_epoch: u64,
         policy_digest: [u8; 32],
-    ) -> Self {
+    ) -> Result<Self, XeniaCheckpointBuildError> {
+        if journal.is_poisoned() {
+            return Err(XeniaCheckpointBuildError::JournalPoisoned);
+        }
+        if !journal.verify_operation_chain() {
+            return Err(XeniaCheckpointBuildError::OperationChainInvalid);
+        }
         let head = journal.head_candidate();
-        Self {
+        Ok(Self {
             journal_scope_commitment: derive_journal_scope_commitment(
                 scope_key,
                 &head.session_fingerprint,
@@ -90,7 +116,7 @@ impl XeniaJournalCheckpointV1 {
             last_operation_sequence: head.last_operation_sequence,
             operation_event_count: journal.events().len() as u64,
             state_counts: journal.state_counts(),
-        }
+        })
     }
 
     /// Deterministically encode the public wire payload.
@@ -171,7 +197,8 @@ impl XeniaJournalCheckpointV1 {
         authority_epoch: u64,
         policy_digest: [u8; 32],
     ) -> bool {
-        *self == Self::from_journal(journal, scope_key, authority_epoch, policy_digest)
+        Self::from_journal(journal, scope_key, authority_epoch, policy_digest)
+            .is_ok_and(|current| *self == current)
     }
 }
 
