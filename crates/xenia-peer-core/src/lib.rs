@@ -54,6 +54,8 @@
 pub mod advertisement;
 pub mod file_transfer;
 pub mod frame;
+pub mod frame_fragmentation;
+pub mod frame_reassembly;
 pub mod handshake;
 pub mod m1_session;
 pub mod producer_flow;
