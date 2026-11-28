@@ -58,6 +58,7 @@ pub mod handshake;
 pub mod m1_session;
 pub mod operation_evidence;
 pub mod operation_evidence_wal;
+pub mod journal_head_anchor;
 pub mod producer_flow;
 pub mod receive_reservation;
 mod session;
