@@ -251,6 +251,19 @@ impl OperationEvidenceStateCounts {
         self.admitted.saturating_add(self.attempted).saturating_add(self.unknown)
     }
 
+    /// Locally committed operations that still lack the stronger observation
+    /// stage. Local commit is not peer receipt, decode, rendering, or display.
+    pub fn pending_observation(self) -> u64 {
+        self.committed.saturating_add(self.reconciled_committed)
+    }
+
+    /// Whether every operation has reached a resolved, observer-appropriate
+    /// terminal state. Rejected and not-committed outcomes are resolved without
+    /// a positive observation; committed outcomes require that observation.
+    pub fn has_unresolved_lifecycle(self) -> bool {
+        self.pending_effects() > 0 || self.pending_observation() > 0
+    }
+
     /// Total distinct operation records represented by this snapshot.
     pub fn total(self) -> u64 {
         self.admitted
