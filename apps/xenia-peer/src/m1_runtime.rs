@@ -30,6 +30,7 @@ use xenia_ledger::{
     SignatureEnvelope, SignatureSuite, Verifier, VerifyError,
 };
 use xenia_peer_core::{
+    M1AuditEvent, M1ClipboardReadOutcome, M1ClipboardWriteOutcome, M1InputEffectOutcome,
     M1Permission, M1PermissionSet, M1SessionError, M1SessionMachine, M1SessionState,
 };
 
@@ -742,6 +743,39 @@ pub(crate) fn verify_sealed_transcript_bound_evidence_bundle_dir_with_backend(
     ))
 }
 
+/// Explicit result class reported by the synchronous input effect owner.
+#[derive(Debug)]
+pub(crate) enum InputEffectExecution {
+    /// The selected platform injector returned success.
+    PlatformAccepted,
+    /// The owner knows no platform call was made (e.g. a no-op fallback).
+    NotAttempted(String),
+    /// A platform call returned an error; partial application is possible.
+    OutcomeUnknown(xenia_inject::InjectError),
+}
+
+/// Result class and optional payload from a synchronous host clipboard read.
+#[derive(Debug)]
+pub(crate) enum HostClipboardReadExecution {
+    /// The read API completed; None means no text was available.
+    Completed(Option<String>),
+    /// No OS read call was made.
+    NotAttempted(String),
+    /// The OS read call returned an uncertain error.
+    OutcomeUnknown(String),
+}
+
+/// Result class from a synchronous host clipboard write.
+#[derive(Debug)]
+pub(crate) enum HostClipboardWriteExecution {
+    /// The OS clipboard write API returned success.
+    Applied,
+    /// No OS write call was made (e.g. validation or API setup rejected first).
+    NotAttempted(String),
+    /// The OS write API returned an error after invocation.
+    OutcomeUnknown(String),
+}
+
 pub(crate) struct M1RuntimeSession {
     session: M1SessionMachine,
     chain: Chain,
@@ -810,6 +844,10 @@ impl M1RuntimeSession {
 
     pub(crate) fn state(&self) -> M1SessionState {
         self.session.state()
+    }
+
+    pub(crate) fn audit_events(&self) -> &[M1AuditEvent] {
+        self.session.audit()
     }
 
     pub(crate) fn entries(&self) -> Vec<LedgerEntry> {
@@ -1004,9 +1042,73 @@ impl M1RuntimeSession {
         self.flush_new_audit_events()
     }
 
-    pub(crate) fn inject_input(&mut self) -> Result<(), M1RuntimeError> {
+    pub(crate) fn admit_input(&mut self) -> Result<(), M1RuntimeError> {
         self.session.inject_input()?;
         self.flush_new_audit_events()
+    }
+
+    /// Admit and execute one synchronous input effect while the caller holds
+    /// the shared M1 runtime mutex. Revocation uses the same mutex, so it
+    /// cannot linearize between permission admission and this effect callback.
+    ///
+    /// Backend-unavailable proves no platform call was made. Other injector
+    /// errors are UNKNOWN because a batch may have partially applied.
+    pub(crate) fn with_input_effect(
+        &mut self,
+        effect: impl FnOnce() -> InputEffectExecution,
+    ) -> Result<InputEffectExecution, M1RuntimeError> {
+        self.session.inject_input()?;
+        self.flush_new_audit_events()?;
+
+        let result = effect();
+        let outcome = match &result {
+            InputEffectExecution::PlatformAccepted => M1InputEffectOutcome::PlatformAccepted,
+            InputEffectExecution::NotAttempted(_) => M1InputEffectOutcome::NotAttempted,
+            InputEffectExecution::OutcomeUnknown(_) => M1InputEffectOutcome::OutcomeUnknown,
+        };
+        self.session.record_input_effect_outcome(outcome)?;
+        self.flush_new_audit_events()?;
+        Ok(result)
+    }
+
+    /// Admit host clipboard disclosure, read the local clipboard, and record
+    /// the synchronous read result under the caller-held M1 runtime mutex.
+    pub(crate) fn with_host_clipboard_read_effect(
+        &mut self,
+        effect: impl FnOnce() -> HostClipboardReadExecution,
+    ) -> Result<HostClipboardReadExecution, M1RuntimeError> {
+        self.session.read_host_clipboard()?;
+        self.flush_new_audit_events()?;
+        let result = effect();
+        let outcome = match &result {
+            HostClipboardReadExecution::Completed(_) => M1ClipboardReadOutcome::ReadCompleted,
+            HostClipboardReadExecution::NotAttempted(_) => M1ClipboardReadOutcome::NotAttempted,
+            HostClipboardReadExecution::OutcomeUnknown(_) => M1ClipboardReadOutcome::OutcomeUnknown,
+        };
+        self.session.record_host_clipboard_read_outcome(outcome)?;
+        self.flush_new_audit_events()?;
+        Ok(result)
+    }
+
+    /// Admit host clipboard mutation, invoke the synchronous OS API, and record
+    /// its result under the caller-held M1 runtime mutex.
+    pub(crate) fn with_host_clipboard_write_effect(
+        &mut self,
+        effect: impl FnOnce() -> HostClipboardWriteExecution,
+    ) -> Result<HostClipboardWriteExecution, M1RuntimeError> {
+        self.session.write_host_clipboard()?;
+        self.flush_new_audit_events()?;
+        let result = effect();
+        let outcome = match &result {
+            HostClipboardWriteExecution::Applied => M1ClipboardWriteOutcome::Applied,
+            HostClipboardWriteExecution::NotAttempted(_) => M1ClipboardWriteOutcome::NotAttempted,
+            HostClipboardWriteExecution::OutcomeUnknown(_) => {
+                M1ClipboardWriteOutcome::OutcomeUnknown
+            }
+        };
+        self.session.record_host_clipboard_write_outcome(outcome)?;
+        self.flush_new_audit_events()?;
+        Ok(result)
     }
 
     pub(crate) fn read_host_clipboard(&mut self) -> Result<(), M1RuntimeError> {
@@ -1062,7 +1164,7 @@ impl M1RuntimeSession {
     }
 
     pub(crate) fn allow_input_flow(&mut self) -> Result<(), M1RuntimeError> {
-        self.inject_input()
+        self.admit_input()
     }
 
     pub(crate) fn allow_host_clipboard_read_flow(&mut self) -> Result<(), M1RuntimeError> {
@@ -1907,7 +2009,7 @@ mod tests {
         runtime.offer().unwrap();
         runtime.grant_consent().unwrap();
         runtime.stream_frame().unwrap();
-        runtime.inject_input().unwrap();
+        runtime.admit_input().unwrap();
         runtime.revoke().unwrap();
 
         assert_eq!(runtime.state(), M1SessionState::Revoked);
@@ -1919,6 +2021,142 @@ mod tests {
         assert_eq!(entries[2].event.kind, ConsentKind::Revocation);
 
         runtime.verify(&verifying_key).unwrap();
+    }
+
+    #[test]
+    fn input_effect_records_admission_and_actual_owner_outcome() {
+        let (mut runtime, verifying_key) = runtime(61);
+        runtime.offer().unwrap();
+        runtime
+            .grant_consent_scoped(M1PermissionSet {
+                inject_input: true,
+                ..M1PermissionSet::default()
+            })
+            .unwrap();
+
+        let accepted = runtime
+            .with_input_effect(|| InputEffectExecution::PlatformAccepted)
+            .unwrap_or_else(|error| panic!("runtime failed: {error:?}"));
+        assert!(matches!(accepted, InputEffectExecution::PlatformAccepted));
+        assert_eq!(
+            &runtime.session.audit()[2..],
+            &[
+                xenia_peer_core::M1AuditEvent::InputPermissionAdmitted,
+                xenia_peer_core::M1AuditEvent::InputPlatformAccepted,
+            ]
+        );
+
+        let unknown = runtime
+            .with_input_effect(|| {
+                InputEffectExecution::OutcomeUnknown(xenia_inject::InjectError::Unavailable(
+                    "backend returned unavailable after invocation".to_string(),
+                ))
+            })
+            .unwrap_or_else(|error| panic!("runtime failed: {error:?}"));
+        assert!(matches!(unknown, InputEffectExecution::OutcomeUnknown(_)));
+        assert_eq!(
+            runtime.session.audit().last(),
+            Some(&xenia_peer_core::M1AuditEvent::InputOutcomeUnknown)
+        );
+
+        let not_attempted = runtime
+            .with_input_effect(|| {
+                InputEffectExecution::NotAttempted(
+                    "no-op fallback installed; platform API was not called".to_string(),
+                )
+            })
+            .unwrap_or_else(|error| panic!("runtime failed: {error:?}"));
+        assert!(matches!(
+            not_attempted,
+            InputEffectExecution::NotAttempted(_)
+        ));
+        assert_eq!(
+            runtime.session.audit().last(),
+            Some(&xenia_peer_core::M1AuditEvent::InputNotAttempted)
+        );
+        runtime.verify(&verifying_key).unwrap();
+    }
+
+    #[test]
+    fn host_clipboard_owner_outcomes_are_recorded() {
+        let (mut runtime, _) = runtime(63);
+        runtime.offer().unwrap();
+        runtime
+            .grant_consent_scoped(M1PermissionSet {
+                read_host_clipboard: true,
+                write_host_clipboard: true,
+                ..M1PermissionSet::default()
+            })
+            .unwrap();
+
+        let read = runtime
+            .with_host_clipboard_read_effect(|| {
+                HostClipboardReadExecution::Completed(Some("private text".to_string()))
+            })
+            .unwrap_or_else(|error| panic!("read failed: {error:?}"));
+        assert!(matches!(
+            read,
+            HostClipboardReadExecution::Completed(Some(_))
+        ));
+        let write = runtime
+            .with_host_clipboard_write_effect(|| HostClipboardWriteExecution::Applied)
+            .unwrap_or_else(|error| panic!("write failed: {error:?}"));
+        assert!(matches!(write, HostClipboardWriteExecution::Applied));
+
+        let audit = runtime.audit_events();
+        assert!(
+            audit.contains(&xenia_peer_core::M1AuditEvent::HostClipboardReadPermissionAdmitted)
+        );
+        assert!(audit.contains(&xenia_peer_core::M1AuditEvent::HostClipboardReadCompleted));
+        assert!(
+            audit.contains(&xenia_peer_core::M1AuditEvent::HostClipboardWritePermissionAdmitted)
+        );
+        assert!(audit.contains(&xenia_peer_core::M1AuditEvent::HostClipboardWriteApplied));
+    }
+
+    #[test]
+    fn clipboard_owner_effects_are_not_invoked_without_permission() {
+        let (mut runtime, _) = runtime(64);
+        runtime.offer().unwrap();
+        runtime
+            .grant_consent_scoped(M1PermissionSet::default())
+            .unwrap();
+
+        let read_called = std::cell::Cell::new(false);
+        let read = runtime.with_host_clipboard_read_effect(|| {
+            read_called.set(true);
+            HostClipboardReadExecution::Completed(None)
+        });
+        assert!(read.is_err());
+        assert!(!read_called.get());
+
+        let write_called = std::cell::Cell::new(false);
+        let write = runtime.with_host_clipboard_write_effect(|| {
+            write_called.set(true);
+            HostClipboardWriteExecution::Applied
+        });
+        assert!(write.is_err());
+        assert!(!write_called.get());
+    }
+
+    #[test]
+    fn input_effect_is_not_invoked_without_permission() {
+        let (mut runtime, _) = runtime(62);
+        runtime.offer().unwrap();
+        runtime
+            .grant_consent_scoped(M1PermissionSet::default())
+            .unwrap();
+        let invoked = std::cell::Cell::new(false);
+        let result = runtime.with_input_effect(|| {
+            invoked.set(true);
+            InputEffectExecution::PlatformAccepted
+        });
+        assert!(result.is_err());
+        assert!(!invoked.get());
+        assert_eq!(
+            runtime.session.audit().last(),
+            Some(&xenia_peer_core::M1AuditEvent::ConsentGranted)
+        );
     }
 
     #[test]
@@ -2496,7 +2734,7 @@ mod tests {
 
         let before_ops = runtime.entries().len();
         runtime.stream_frame().unwrap();
-        runtime.inject_input().unwrap();
+        runtime.admit_input().unwrap();
         let after_ops = runtime.entries().len();
 
         assert_eq!(before_ops, 2);

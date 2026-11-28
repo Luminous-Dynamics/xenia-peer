@@ -1792,70 +1792,54 @@ fn build_input_injector(
 /// it cannot be held across an `.await` point shared between the poll loop
 /// and the recv task. Opening a connection per poll (default every 500ms)
 /// is cheap enough not to matter.
-fn read_host_clipboard_text() -> Option<String> {
+fn read_host_clipboard_text() -> crate::m1_runtime::HostClipboardReadExecution {
     let mut clipboard = match arboard::Clipboard::new() {
         Ok(clipboard) => clipboard,
         Err(err) => {
-            warn!(error = %err, "failed to open host clipboard for reading");
-            return None;
+            return crate::m1_runtime::HostClipboardReadExecution::NotAttempted(err.to_string());
         }
     };
     match clipboard.get_text() {
-        Ok(text) => Some(text),
-        Err(arboard::Error::ContentNotAvailable) => None,
-        Err(err) => {
-            warn!(error = %err, "failed to read host clipboard text");
-            None
+        Ok(text) => crate::m1_runtime::HostClipboardReadExecution::Completed(Some(text)),
+        Err(arboard::Error::ContentNotAvailable) => {
+            crate::m1_runtime::HostClipboardReadExecution::Completed(None)
         }
+        Err(err) => crate::m1_runtime::HostClipboardReadExecution::OutcomeUnknown(err.to_string()),
     }
 }
 
-/// Apply a viewer-originated clipboard update to the real host clipboard.
-/// Only called in `--clipboard bidirectional` mode, after the M1 consent
-/// gate has already allowed the flow.
 /// Cap on a single viewer-originated clipboard update applied to the host
-/// clipboard. Without a dedicated cap this is bounded only by the 16 MiB
-/// envelope limit, letting a bidirectional viewer stuff megabytes into the
-/// host clipboard on every update. 1 MiB is well above any realistic text
-/// clipboard.
+/// clipboard. 1 MiB is well above any realistic text clipboard.
 const MAX_INBOUND_CLIPBOARD_BYTES: usize = 1024 * 1024;
 
-fn apply_clipboard_content(content: &ClipboardContent) {
+/// Apply viewer-originated clipboard data and return the actual OS API outcome.
+fn apply_clipboard_content(
+    content: &ClipboardContent,
+) -> crate::m1_runtime::HostClipboardWriteExecution {
     if let ClipboardContent::Text(text) = content
         && text.len() > MAX_INBOUND_CLIPBOARD_BYTES
     {
-        warn!(
-            len = text.len(),
-            cap = MAX_INBOUND_CLIPBOARD_BYTES,
-            "viewer clipboard update exceeds cap; ignoring"
-        );
-        return;
+        return crate::m1_runtime::HostClipboardWriteExecution::NotAttempted(format!(
+            "viewer clipboard update is {} bytes; cap is {}",
+            text.len(),
+            MAX_INBOUND_CLIPBOARD_BYTES
+        ));
     }
     let mut clipboard = match arboard::Clipboard::new() {
         Ok(clipboard) => clipboard,
         Err(err) => {
-            warn!(error = %err, "failed to open host clipboard for writing");
-            return;
+            return crate::m1_runtime::HostClipboardWriteExecution::NotAttempted(err.to_string());
         }
     };
-    // `Cleared` deliberately uses `set_text("")` rather than `clipboard.clear()`.
-    // Verified live on a real KDE-Wayland session: `clear()` only unsets the
-    // calling connection's own (momentary) selection -- it does not preempt
-    // a selection still actively served by an *earlier* `set_text()` call's
-    // background wl-data-control server, so a stale value kept reading back
-    // after `clear()` returned `Ok`. `set_text("")` actively claims
-    // ownership with empty content, which does override it.
+    // set_text("") actively claims ownership with empty content; clipboard.clear()
+    // does not reliably replace content still served by a prior Wayland owner.
     let result = match content {
         ClipboardContent::Text(text) => clipboard.set_text(text.clone()),
         ClipboardContent::Cleared => clipboard.set_text(String::new()),
     };
-    if let Err(err) = result {
-        warn!(error = %err, "failed to apply viewer clipboard update to host clipboard");
-    } else {
-        info!(
-            ?content,
-            "applied viewer clipboard update to host clipboard"
-        );
+    match result {
+        Ok(()) => crate::m1_runtime::HostClipboardWriteExecution::Applied,
+        Err(err) => crate::m1_runtime::HostClipboardWriteExecution::OutcomeUnknown(err.to_string()),
     }
 }
 
@@ -6585,14 +6569,55 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         warn!("ignoring viewer clipboard update: --clipboard is not bidirectional");
                         continue;
                     }
-                    {
+                    let clipboard_bytes = match &clipboard.content {
+                        ClipboardContent::Text(text) => text.len(),
+                        ClipboardContent::Cleared => 0,
+                    };
+                    let clipboard_kind = match &clipboard.content {
+                        ClipboardContent::Text(_) => "text",
+                        ClipboardContent::Cleared => "cleared",
+                    };
+                    let write_execution = {
                         let mut m1_runtime = m1_runtime.lock().await;
-                        if let Err(err) = m1_runtime.allow_host_clipboard_write_flow() {
-                            warn!(error = %err, "clipboard update rejected by M1 consent gate");
+                        m1_runtime.with_host_clipboard_write_effect(|| {
+                            apply_clipboard_content(&clipboard.content)
+                        })
+                    };
+                    let write_execution = match write_execution {
+                        Ok(result) => result,
+                        Err(err) => {
+                            warn!(
+                                error = %err,
+                                "clipboard update rejected by M1 consent gate"
+                            );
                             continue;
                         }
+                    };
+                    match write_execution {
+                        crate::m1_runtime::HostClipboardWriteExecution::Applied => {
+                            info!(
+                                clipboard_kind,
+                                bytes = clipboard_bytes,
+                                "host clipboard API accepted viewer update"
+                            );
+                        }
+                        crate::m1_runtime::HostClipboardWriteExecution::NotAttempted(reason) => {
+                            warn!(
+                                reason,
+                                clipboard_kind,
+                                bytes = clipboard_bytes,
+                                "host clipboard update was not attempted"
+                            );
+                        }
+                        crate::m1_runtime::HostClipboardWriteExecution::OutcomeUnknown(error) => {
+                            warn!(
+                                error,
+                                clipboard_kind,
+                                bytes = clipboard_bytes,
+                                "host clipboard write returned an uncertain outcome"
+                            );
+                        }
                     }
-                    apply_clipboard_content(&clipboard.content);
                     continue;
                 }
 
@@ -6621,32 +6646,60 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         continue;
                     }
                 };
-                {
+                let width = screen_dims.0.load(Ordering::Relaxed);
+                let height = screen_dims.1.load(Ordering::Relaxed);
+                // Permission admission, the synchronous platform call and its
+                // outcome event share the M1 runtime lock with revoke(). This
+                // is the local effect-owner linearization point.
+                let injection_result = {
                     let mut m1_runtime = m1_runtime.lock().await;
-                    if let Err(err) = m1_runtime.allow_input_flow() {
+                    m1_runtime.with_input_effect(|| {
+                        let injector = injector.get_or_insert_with(|| {
+                            SessionInputInjector::new(build_input_injector(
+                                input_backend,
+                                width,
+                                height,
+                            ))
+                        });
+                        if injector.backend_name() == "noop" {
+                            return crate::m1_runtime::InputEffectExecution::NotAttempted(
+                                "configured input backend is unavailable".to_string(),
+                            );
+                        }
+                        match injector.process_events(std::slice::from_ref(&event)) {
+                            Ok(()) => crate::m1_runtime::InputEffectExecution::PlatformAccepted,
+                            Err(error) => {
+                                crate::m1_runtime::InputEffectExecution::OutcomeUnknown(error)
+                            }
+                        }
+                    })
+                };
+                let injection_result = match injection_result {
+                    Ok(result) => result,
+                    Err(err) => {
                         warn!(error = %err, "input event rejected by M1 consent gate");
                         continue;
                     }
-                }
-
-                let width = screen_dims.0.load(Ordering::Relaxed);
-                let height = screen_dims.1.load(Ordering::Relaxed);
-                let injector = injector.get_or_insert_with(|| {
-                    SessionInputInjector::new(build_input_injector(input_backend, width, height))
-                });
-                match injector.process_events(std::slice::from_ref(&event)) {
-                    Ok(()) => {
-                        info!(
-                            ?event,
-                            backend = injector.backend_name(),
-                            "input event injected"
+                };
+                let backend = injector
+                    .as_ref()
+                    .map(|value| value.backend_name())
+                    .unwrap_or("unavailable");
+                match injection_result {
+                    crate::m1_runtime::InputEffectExecution::PlatformAccepted => {
+                        info!(?event, backend, "platform input injector accepted event");
+                    }
+                    crate::m1_runtime::InputEffectExecution::NotAttempted(reason) => {
+                        warn!(
+                            reason,
+                            backend, "input event was not attempted by a platform backend"
                         );
                     }
-                    Err(err) => {
+                    crate::m1_runtime::InputEffectExecution::OutcomeUnknown(error) => {
                         warn!(
-                            error = %err,
-                            backend = injector.backend_name(),
-                            "input injection failed"
+                            error = %error,
+                            backend,
+                            "input injector returned an uncertain outcome"
                         );
                     }
                 }
@@ -6799,30 +6852,44 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             && last_clipboard_check.elapsed() >= clipboard_interval
         {
             last_clipboard_check = std::time::Instant::now();
-            if let Some(text) = read_host_clipboard_text()
-                && Some(&text) != last_sent_clipboard_text.as_ref()
-            {
-                m1_runtime.lock().await.preflight_frame_flow()?;
-                m1_runtime.lock().await.allow_host_clipboard_read_flow()?;
-                let frame_id = session.lock().await.next_frame_id();
-                let seq = clipboard_seq;
-                clipboard_seq += 1;
-                let clipboard_frame = RawClipboard {
-                    sequence: seq,
-                    timestamp_ms: now_ms(),
-                    content: ClipboardContent::Text(text.clone()),
+            // Permission admission and the local OS clipboard read are
+            // serialized with revoke. The actual peer disclosure remains a
+            // separate frame-send stage checked immediately before send.
+            let read_execution = {
+                let mut m1_runtime = m1_runtime.lock().await;
+                m1_runtime.with_host_clipboard_read_effect(read_host_clipboard_text)?
+            };
+            match read_execution {
+                crate::m1_runtime::HostClipboardReadExecution::Completed(Some(text))
+                    if Some(&text) != last_sent_clipboard_text.as_ref() =>
+                {
+                    let frame_id = session.lock().await.next_frame_id();
+                    let seq = clipboard_seq;
+                    clipboard_seq += 1;
+                    let clipboard_frame = RawClipboard {
+                        sequence: seq,
+                        timestamp_ms: now_ms(),
+                        content: ClipboardContent::Text(text.clone()),
+                    }
+                    .into_frame(frame_id)?;
+                    let envelope = session.lock().await.seal_frame(&clipboard_frame)?;
+                    m1_runtime.lock().await.allow_frame_flow()?;
+                    send_half.send_envelope(&envelope).await?;
+                    last_sent_clipboard_text = Some(text);
+                    sent_clipboard += 1;
+                    if sent_clipboard <= 3 || sent_clipboard.is_multiple_of(10) {
+                        info!(
+                            sent = sent_clipboard,
+                            frame_id, "clipboard update sealed and sent"
+                        );
+                    }
                 }
-                .into_frame(frame_id)?;
-                let envelope = session.lock().await.seal_frame(&clipboard_frame)?;
-                m1_runtime.lock().await.allow_frame_flow()?;
-                send_half.send_envelope(&envelope).await?;
-                last_sent_clipboard_text = Some(text);
-                sent_clipboard += 1;
-                if sent_clipboard <= 3 || sent_clipboard.is_multiple_of(10) {
-                    info!(
-                        sent = sent_clipboard,
-                        frame_id, "clipboard update sealed and sent"
-                    );
+                crate::m1_runtime::HostClipboardReadExecution::Completed(_) => {}
+                crate::m1_runtime::HostClipboardReadExecution::NotAttempted(reason) => {
+                    warn!(reason, "host clipboard read was not attempted");
+                }
+                crate::m1_runtime::HostClipboardReadExecution::OutcomeUnknown(error) => {
+                    warn!(error, "host clipboard read returned an uncertain outcome");
                 }
             }
         }
@@ -6993,7 +7060,7 @@ fn run_m1_runtime_smoke(
     runtime.offer()?;
     runtime.grant_consent()?;
     runtime.stream_frame()?;
-    runtime.inject_input()?;
+    runtime.admit_input()?;
     runtime.revoke()?;
     runtime.verify(&verifying_key)?;
 
@@ -7252,5 +7319,89 @@ mod consent_scope_tests {
         );
         assert!(configured_permission_set(&send).send_file_to_viewer);
         assert!(!configured_permission_set(&send).receive_file_from_viewer);
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn revoke_waits_until_synchronous_input_effect_and_receipt_finish() {
+        let mut runtime = crate::m1_runtime::M1RuntimeSession::new(
+            SigningKey::from_bytes(&[0x61; 32]),
+            [0xA1; 32],
+            Uuid::from_bytes([0x11; 16]),
+            Uuid::from_bytes([0x22; 16]),
+            "input effect linearization test",
+        );
+        runtime.offer().unwrap();
+        runtime
+            .grant_consent_scoped(M1PermissionSet {
+                inject_input: true,
+                ..M1PermissionSet::default()
+            })
+            .unwrap();
+
+        let runtime = Arc::new(AsyncMutex::new(runtime));
+        let effect_entered = Arc::new(AtomicBool::new(false));
+        let revoke_attempting = Arc::new(AtomicBool::new(false));
+        let effect_finished = Arc::new(AtomicBool::new(false));
+
+        let input_runtime = Arc::clone(&runtime);
+        let input_entered = Arc::clone(&effect_entered);
+        let input_revoke_attempting = Arc::clone(&revoke_attempting);
+        let input_finished = Arc::clone(&effect_finished);
+        let input_task = tokio::spawn(async move {
+            let mut runtime = input_runtime.lock().await;
+            runtime
+                .with_input_effect(|| {
+                    input_entered.store(true, Ordering::SeqCst);
+                    while !input_revoke_attempting.load(Ordering::SeqCst) {
+                        std::thread::yield_now();
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                    input_finished.store(true, Ordering::SeqCst);
+                    crate::m1_runtime::InputEffectExecution::PlatformAccepted
+                })
+                .unwrap_or_else(|error| panic!("input effect runtime failed: {error:?}"));
+        });
+
+        let revoke_runtime = Arc::clone(&runtime);
+        let revoke_entered = Arc::clone(&effect_entered);
+        let revoke_attempting_flag = Arc::clone(&revoke_attempting);
+        let revoke_finished = Arc::clone(&effect_finished);
+        let revoke_task = tokio::spawn(async move {
+            while !revoke_entered.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+            revoke_attempting_flag.store(true, Ordering::SeqCst);
+            let mut runtime = revoke_runtime.lock().await;
+            let effect_was_finished = revoke_finished.load(Ordering::SeqCst);
+            runtime
+                .revoke()
+                .unwrap_or_else(|error| panic!("revoke failed: {error:?}"));
+            effect_was_finished
+        });
+
+        input_task
+            .await
+            .unwrap_or_else(|error| panic!("input task panicked: {error}"));
+        let effect_finished_before_revoke = revoke_task
+            .await
+            .unwrap_or_else(|error| panic!("revoke task panicked: {error}"));
+        assert!(effect_finished_before_revoke);
+
+        let runtime = runtime.lock().await;
+        assert_eq!(runtime.state(), xenia_peer_core::M1SessionState::Revoked);
+        let audit = runtime.audit_events();
+        let admitted = audit
+            .iter()
+            .position(|event| *event == xenia_peer_core::M1AuditEvent::InputPermissionAdmitted);
+        let accepted = audit
+            .iter()
+            .position(|event| *event == xenia_peer_core::M1AuditEvent::InputPlatformAccepted);
+        let revoked = audit
+            .iter()
+            .position(|event| *event == xenia_peer_core::M1AuditEvent::ConsentRevoked);
+        assert!(admitted.is_some());
+        assert!(accepted.is_some());
+        assert!(revoked.is_some());
+        assert!(admitted < accepted);
+        assert!(accepted < revoked);
     }
 }

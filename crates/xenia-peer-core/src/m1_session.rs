@@ -135,6 +135,39 @@ impl M1PermissionSet {
     }
 }
 
+/// Outcome reported by the synchronous platform input effect owner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum M1InputEffectOutcome {
+    /// The platform injector returned Ok for the submitted event.
+    PlatformAccepted,
+    /// The injector returned an error and may have partially applied input.
+    OutcomeUnknown,
+    /// The injector was unavailable, so no platform call was made.
+    NotAttempted,
+}
+
+/// Outcome reported by the synchronous host clipboard read owner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum M1ClipboardReadOutcome {
+    /// The OS clipboard read call completed; content may be empty/unavailable.
+    ReadCompleted,
+    /// No OS clipboard read call was made.
+    NotAttempted,
+    /// The clipboard read call failed with an uncertain outcome.
+    OutcomeUnknown,
+}
+
+/// Outcome reported by the synchronous host clipboard write owner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum M1ClipboardWriteOutcome {
+    /// The OS clipboard write API returned success.
+    Applied,
+    /// No OS clipboard write call was made.
+    NotAttempted,
+    /// The OS clipboard write API returned an error.
+    OutcomeUnknown,
+}
+
 /// Audit event emitted by the M1 lifecycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum M1AuditEvent {
@@ -144,21 +177,21 @@ pub enum M1AuditEvent {
     ConsentGranted,
     /// Consent was denied.
     ConsentDenied,
-    /// A frame was allowed through the active session.
+    /// Legacy success-shaped label; new code emits FramePermissionAdmitted.
     FrameStreamed,
-    /// A telemetry batch was allowed through the active session.
+    /// Legacy success-shaped label; new code emits TelemetryPermissionAdmitted.
     TelemetryStreamed,
-    /// An audio frame was allowed through the active session.
+    /// Legacy success-shaped label; new code emits AudioPermissionAdmitted.
     AudioStreamed,
-    /// An input event was allowed through the active session.
+    /// Legacy success-shaped label; new code emits InputPermissionAdmitted.
     InputInjected,
-    /// Host clipboard contents were disclosed to the viewer.
+    /// Legacy success-shaped label; new code emits HostClipboardReadPermissionAdmitted.
     HostClipboardRead,
-    /// A viewer-originated clipboard update was applied to the host clipboard.
+    /// Legacy success-shaped label; new code emits HostClipboardWritePermissionAdmitted.
     HostClipboardWritten,
-    /// Host file bytes were sent to the viewer.
+    /// Legacy success-shaped label; new code emits FileSendPermissionAdmitted.
     FileSentToViewer,
-    /// Viewer file bytes were accepted for host storage.
+    /// Legacy success-shaped label; new code emits FileReceivePermissionAdmitted.
     FileReceivedFromViewer,
     /// Consent was revoked.
     ConsentRevoked,
@@ -166,6 +199,40 @@ pub enum M1AuditEvent {
     SessionEnded,
     /// The session failed.
     SessionFailed,
+    /// Permission admission for a frame send; not evidence of transport delivery.
+    FramePermissionAdmitted,
+    /// Permission admission for telemetry; not evidence of transport delivery.
+    TelemetryPermissionAdmitted,
+    /// Permission admission for audio; not evidence of transport delivery.
+    AudioPermissionAdmitted,
+    /// Permission admission for a reverse-path input operation.
+    InputPermissionAdmitted,
+    /// Permission admission to read/disclose the host clipboard.
+    HostClipboardReadPermissionAdmitted,
+    /// Permission admission to apply viewer-originated host clipboard data.
+    HostClipboardWritePermissionAdmitted,
+    /// Permission admission for host-to-viewer file transfer.
+    FileSendPermissionAdmitted,
+    /// Permission admission for viewer-to-host file transfer.
+    FileReceivePermissionAdmitted,
+    /// The platform input injector returned success for the submitted event.
+    InputPlatformAccepted,
+    /// The injector returned an error; partial platform application is possible.
+    InputOutcomeUnknown,
+    /// No platform input was attempted, for example because the backend is unavailable.
+    InputNotAttempted,
+    /// The host clipboard read API completed under the read permission.
+    HostClipboardReadCompleted,
+    /// The host clipboard read API failed with an uncertain outcome.
+    HostClipboardReadOutcomeUnknown,
+    /// The host clipboard read API was not invoked.
+    HostClipboardReadNotAttempted,
+    /// The host clipboard write API returned success.
+    HostClipboardWriteApplied,
+    /// The host clipboard write API returned an error.
+    HostClipboardWriteOutcomeUnknown,
+    /// The host clipboard write API was not invoked.
+    HostClipboardWriteNotAttempted,
 }
 
 /// Typed M1 state-machine failure.
@@ -347,7 +414,7 @@ impl M1SessionMachine {
     /// Record that one frame was allowed through the forward path.
     pub fn stream_frame(&mut self) -> Result<(), M1SessionError> {
         self.require_active(M1Permission::StreamFrame)?;
-        self.audit.push(M1AuditEvent::FrameStreamed);
+        self.audit.push(M1AuditEvent::FramePermissionAdmitted);
         Ok(())
     }
 
@@ -358,7 +425,7 @@ impl M1SessionMachine {
     /// [`stream_frame`]: Self::stream_frame
     pub fn stream_telemetry(&mut self) -> Result<(), M1SessionError> {
         self.require_active(M1Permission::StreamTelemetry)?;
-        self.audit.push(M1AuditEvent::TelemetryStreamed);
+        self.audit.push(M1AuditEvent::TelemetryPermissionAdmitted);
         Ok(())
     }
 
@@ -369,46 +436,100 @@ impl M1SessionMachine {
     /// [`stream_frame`]: Self::stream_frame
     pub fn stream_audio(&mut self) -> Result<(), M1SessionError> {
         self.require_active(M1Permission::StreamAudio)?;
-        self.audit.push(M1AuditEvent::AudioStreamed);
+        self.audit.push(M1AuditEvent::AudioPermissionAdmitted);
         Ok(())
     }
 
-    /// Record that one input event was allowed through the reverse path.
+    /// Admit permission for one reverse-path input effect. The platform
+    /// injector result is appended separately by the effect owner.
     pub fn inject_input(&mut self) -> Result<(), M1SessionError> {
         self.require_active(M1Permission::InjectInput)?;
-        self.audit.push(M1AuditEvent::InputInjected);
+        self.audit.push(M1AuditEvent::InputPermissionAdmitted);
         Ok(())
     }
 
-    /// Record that host clipboard contents were disclosed to the viewer on
-    /// the forward path.
+    /// Admit permission for host clipboard disclosure on the forward path.
+    /// The actual read and transport send are recorded separately.
     pub fn read_host_clipboard(&mut self) -> Result<(), M1SessionError> {
         self.require_active(M1Permission::ReadHostClipboard)?;
-        self.audit.push(M1AuditEvent::HostClipboardRead);
+        self.audit
+            .push(M1AuditEvent::HostClipboardReadPermissionAdmitted);
         Ok(())
     }
 
-    /// Record that one viewer-originated clipboard update was applied to
-    /// the host clipboard on the reverse path.
+    /// Admit permission for a viewer-originated host clipboard write.
+    /// The actual OS clipboard result is recorded separately.
     pub fn write_host_clipboard(&mut self) -> Result<(), M1SessionError> {
         self.require_active(M1Permission::WriteHostClipboard)?;
-        self.audit.push(M1AuditEvent::HostClipboardWritten);
+        self.audit
+            .push(M1AuditEvent::HostClipboardWritePermissionAdmitted);
         Ok(())
     }
 
-    /// Record that one chunk of a host-initiated (forward-path) file
-    /// transfer was allowed through.
+    /// Admit permission for a host-initiated (forward-path) file transfer.
+    /// Chunk reads/sends and peer verification are recorded separately.
     pub fn send_file_to_viewer(&mut self) -> Result<(), M1SessionError> {
         self.require_active(M1Permission::SendFileToViewer)?;
-        self.audit.push(M1AuditEvent::FileSentToViewer);
+        self.audit.push(M1AuditEvent::FileSendPermissionAdmitted);
         Ok(())
     }
 
-    /// Record that one chunk of a viewer-initiated (reverse-path) file
-    /// transfer was allowed through.
+    /// Admit permission for a viewer-initiated (reverse-path) file transfer.
+    /// Chunk staging and verified publication are recorded separately.
     pub fn receive_file_from_viewer(&mut self) -> Result<(), M1SessionError> {
         self.require_active(M1Permission::ReceiveFileFromViewer)?;
-        self.audit.push(M1AuditEvent::FileReceivedFromViewer);
+        self.audit.push(M1AuditEvent::FileReceivePermissionAdmitted);
+        Ok(())
+    }
+
+    /// Record the outcome returned by the actual synchronous input effect owner.
+    ///
+    /// This is separate from `inject_input`, which records permission admission
+    /// only. An injector error may follow partial application, so it is UNKNOWN
+    /// rather than a definitive failure.
+    pub fn record_input_effect_outcome(
+        &mut self,
+        outcome: M1InputEffectOutcome,
+    ) -> Result<(), M1SessionError> {
+        self.require_active(M1Permission::InjectInput)?;
+        let event = match outcome {
+            M1InputEffectOutcome::PlatformAccepted => M1AuditEvent::InputPlatformAccepted,
+            M1InputEffectOutcome::OutcomeUnknown => M1AuditEvent::InputOutcomeUnknown,
+            M1InputEffectOutcome::NotAttempted => M1AuditEvent::InputNotAttempted,
+        };
+        self.audit.push(event);
+        Ok(())
+    }
+
+    /// Record the result of the actual synchronous host clipboard read call.
+    pub fn record_host_clipboard_read_outcome(
+        &mut self,
+        outcome: M1ClipboardReadOutcome,
+    ) -> Result<(), M1SessionError> {
+        self.require_active(M1Permission::ReadHostClipboard)?;
+        let event = match outcome {
+            M1ClipboardReadOutcome::ReadCompleted => M1AuditEvent::HostClipboardReadCompleted,
+            M1ClipboardReadOutcome::NotAttempted => M1AuditEvent::HostClipboardReadNotAttempted,
+            M1ClipboardReadOutcome::OutcomeUnknown => M1AuditEvent::HostClipboardReadOutcomeUnknown,
+        };
+        self.audit.push(event);
+        Ok(())
+    }
+
+    /// Record the result of the actual synchronous host clipboard write call.
+    pub fn record_host_clipboard_write_outcome(
+        &mut self,
+        outcome: M1ClipboardWriteOutcome,
+    ) -> Result<(), M1SessionError> {
+        self.require_active(M1Permission::WriteHostClipboard)?;
+        let event = match outcome {
+            M1ClipboardWriteOutcome::Applied => M1AuditEvent::HostClipboardWriteApplied,
+            M1ClipboardWriteOutcome::NotAttempted => M1AuditEvent::HostClipboardWriteNotAttempted,
+            M1ClipboardWriteOutcome::OutcomeUnknown => {
+                M1AuditEvent::HostClipboardWriteOutcomeUnknown
+            }
+        };
+        self.audit.push(event);
         Ok(())
     }
 
@@ -729,8 +850,8 @@ mod tests {
             &[
                 M1AuditEvent::SessionOffered,
                 M1AuditEvent::ConsentGranted,
-                M1AuditEvent::FrameStreamed,
-                M1AuditEvent::InputInjected
+                M1AuditEvent::FramePermissionAdmitted,
+                M1AuditEvent::InputPermissionAdmitted
             ]
         );
     }
@@ -781,8 +902,8 @@ mod tests {
             &[
                 M1AuditEvent::SessionOffered,
                 M1AuditEvent::ConsentGranted,
-                M1AuditEvent::HostClipboardRead,
-                M1AuditEvent::HostClipboardWritten
+                M1AuditEvent::HostClipboardReadPermissionAdmitted,
+                M1AuditEvent::HostClipboardWritePermissionAdmitted
             ]
         );
     }
@@ -833,8 +954,90 @@ mod tests {
             &[
                 M1AuditEvent::SessionOffered,
                 M1AuditEvent::ConsentGranted,
-                M1AuditEvent::FileSentToViewer,
-                M1AuditEvent::FileReceivedFromViewer
+                M1AuditEvent::FileSendPermissionAdmitted,
+                M1AuditEvent::FileReceivePermissionAdmitted
+            ]
+        );
+    }
+
+    #[test]
+    fn input_effect_outcomes_are_distinct_from_permission_admission() {
+        let mut session = M1SessionMachine::new();
+        session.offer().unwrap();
+        session
+            .grant_consent_scoped(M1PermissionSet {
+                inject_input: true,
+                ..M1PermissionSet::default()
+            })
+            .unwrap();
+
+        session.inject_input().unwrap();
+        session
+            .record_input_effect_outcome(M1InputEffectOutcome::PlatformAccepted)
+            .unwrap();
+        session
+            .record_input_effect_outcome(M1InputEffectOutcome::OutcomeUnknown)
+            .unwrap();
+        session
+            .record_input_effect_outcome(M1InputEffectOutcome::NotAttempted)
+            .unwrap();
+
+        assert_eq!(
+            &session.audit()[2..],
+            &[
+                M1AuditEvent::InputPermissionAdmitted,
+                M1AuditEvent::InputPlatformAccepted,
+                M1AuditEvent::InputOutcomeUnknown,
+                M1AuditEvent::InputNotAttempted,
+            ]
+        );
+    }
+
+    #[test]
+    fn clipboard_effect_outcomes_are_distinct_from_permission_admission() {
+        let mut session = M1SessionMachine::new();
+        session.offer().unwrap();
+        session
+            .grant_consent_scoped(M1PermissionSet {
+                read_host_clipboard: true,
+                write_host_clipboard: true,
+                ..M1PermissionSet::default()
+            })
+            .unwrap();
+
+        session.read_host_clipboard().unwrap();
+        session
+            .record_host_clipboard_read_outcome(M1ClipboardReadOutcome::ReadCompleted)
+            .unwrap();
+        session
+            .record_host_clipboard_read_outcome(M1ClipboardReadOutcome::OutcomeUnknown)
+            .unwrap();
+        session
+            .record_host_clipboard_read_outcome(M1ClipboardReadOutcome::NotAttempted)
+            .unwrap();
+
+        session.write_host_clipboard().unwrap();
+        session
+            .record_host_clipboard_write_outcome(M1ClipboardWriteOutcome::Applied)
+            .unwrap();
+        session
+            .record_host_clipboard_write_outcome(M1ClipboardWriteOutcome::OutcomeUnknown)
+            .unwrap();
+        session
+            .record_host_clipboard_write_outcome(M1ClipboardWriteOutcome::NotAttempted)
+            .unwrap();
+
+        assert_eq!(
+            &session.audit()[2..],
+            &[
+                M1AuditEvent::HostClipboardReadPermissionAdmitted,
+                M1AuditEvent::HostClipboardReadCompleted,
+                M1AuditEvent::HostClipboardReadOutcomeUnknown,
+                M1AuditEvent::HostClipboardReadNotAttempted,
+                M1AuditEvent::HostClipboardWritePermissionAdmitted,
+                M1AuditEvent::HostClipboardWriteApplied,
+                M1AuditEvent::HostClipboardWriteOutcomeUnknown,
+                M1AuditEvent::HostClipboardWriteNotAttempted,
             ]
         );
     }
