@@ -273,12 +273,7 @@ mod tests {
         authority_epoch: u64,
         policy_digest: [u8; 32],
     ) -> XeniaJournalCheckpointV1 {
-        XeniaJournalCheckpointV1::from_journal(
-            journal,
-            scope_key,
-            authority_epoch,
-            policy_digest,
-        )
+        XeniaJournalCheckpointV1::from_journal(journal, scope_key, authority_epoch, policy_digest)
         .unwrap_or_else(|error| panic!("checkpoint build failed: {error:?}"))
     }
 
@@ -330,8 +325,7 @@ mod tests {
         journal
             .admit(OperationId([1; 16]), 1, context(session, 1), 1, [5; 32])
             .unwrap_or_else(|error| panic!("admission failed: {error:?}"));
-        let checkpoint =
-            build_checkpoint(&journal, &[0xB2; 32], 7, [0xC3; 32]);
+        let checkpoint = build_checkpoint(&journal, &[0xB2; 32], 7, [0xC3; 32]);
         let bytes = checkpoint.canonical_bytes();
         assert_eq!(
             checkpoint,
@@ -423,8 +417,7 @@ mod tests {
             .mark_committed(operation_id, 3, [13; 32])
             .unwrap_or_else(|error| panic!("commit failed: {error:?}"));
 
-        let committed =
-            build_checkpoint(&journal, &[0xCC; 32], 7, [0xDD; 32]);
+        let committed = build_checkpoint(&journal, &[0xCC; 32], 7, [0xDD; 32]);
         assert_eq!(committed.state_counts.committed, 1);
         assert_eq!(committed.state_counts.observed, 0);
         assert_eq!(committed.state_counts.pending_effects(), 0);
@@ -459,8 +452,7 @@ mod tests {
         journal
             .mark_unknown(OperationId([1; 16]), 3, [10; 32])
             .unwrap_or_else(|error| panic!("unknown failed: {error:?}"));
-        let checkpoint =
-            build_checkpoint(&journal, &[0xAA; 32], 7, [0xBB; 32]);
+        let checkpoint = build_checkpoint(&journal, &[0xAA; 32], 7, [0xBB; 32]);
         assert_eq!(checkpoint.state_counts.unknown, 1);
         assert_eq!(checkpoint.state_counts.pending_effects(), 1);
         assert!(checkpoint.has_unresolved_effects());
