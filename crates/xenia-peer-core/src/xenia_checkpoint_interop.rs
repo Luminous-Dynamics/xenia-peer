@@ -27,8 +27,7 @@ pub const XENIA_MYCELIX_CHECKPOINT_SCHEMA_VERSION: u16 = 1;
 pub const XENIA_MYCELIX_CHECKPOINT_DOMAIN: &[u8] =
     b"XENIA-MYCELIX-OPERATION-JOURNAL-CHECKPOINT-V1\0";
 /// Domain separator for the local BLAKE3 checkpoint digest.
-pub const XENIA_MYCELIX_CHECKPOINT_DIGEST_DOMAIN: &[u8] =
-    b"XENIA-MYCELIX-CHECKPOINT-DIGEST-V1\0";
+pub const XENIA_MYCELIX_CHECKPOINT_DIGEST_DOMAIN: &[u8] = b"XENIA-MYCELIX-CHECKPOINT-DIGEST-V1\0";
 /// Domain separator for deployment-scoped journal identity.
 pub const XENIA_MYCELIX_SCOPE_DOMAIN: &[u8] = b"XENIA-MYCELIX-JOURNAL-SCOPE-V1\0";
 
@@ -243,8 +242,7 @@ mod tests {
 
     #[test]
     fn canonical_checkpoint_matches_shared_cross_language_golden_vector() {
-        const FIXTURE: &str =
-            include_str!("../../../fixtures/xenia-myclix-checkpoint-v1.kat");
+        const FIXTURE: &str = include_str!("../../../fixtures/xenia-myclix-checkpoint-v1.kat");
         let expected = FIXTURE
             .lines()
             .find_map(|line| line.strip_prefix("payload_hex="))
@@ -306,7 +304,10 @@ mod tests {
         assert!(checkpoint.has_unresolved_effects());
         assert!(checkpoint.has_unresolved_lifecycle());
         assert!(checkpoint.matches_journal(&journal, &[0xB2; 32], 7, [0xC3; 32]));
-        assert!(checkpoint_matches_head(&checkpoint, &journal.head_candidate()));
+        assert!(checkpoint_matches_head(
+            &checkpoint,
+            &journal.head_candidate()
+        ));
         drop(journal);
         remove_journal(&path);
     }
@@ -315,10 +316,22 @@ mod tests {
     fn scope_commitment_is_keyed_and_deployment_scoped() {
         let session = [1; 32];
         let first = derive_journal_scope_commitment(&[2; 32], &session, 3);
-        assert_eq!(first, derive_journal_scope_commitment(&[2; 32], &session, 3));
-        assert_ne!(first, derive_journal_scope_commitment(&[4; 32], &session, 3));
-        assert_ne!(first, derive_journal_scope_commitment(&[2; 32], &session, 4));
-        assert_ne!(first, derive_journal_scope_commitment(&[2; 32], &[9; 32], 3));
+        assert_eq!(
+            first,
+            derive_journal_scope_commitment(&[2; 32], &session, 3)
+        );
+        assert_ne!(
+            first,
+            derive_journal_scope_commitment(&[4; 32], &session, 3)
+        );
+        assert_ne!(
+            first,
+            derive_journal_scope_commitment(&[2; 32], &session, 4)
+        );
+        assert_ne!(
+            first,
+            derive_journal_scope_commitment(&[2; 32], &[9; 32], 3)
+        );
     }
 
     #[test]
@@ -380,8 +393,7 @@ mod tests {
         journal
             .mark_observed(operation_id, 4, [14; 32])
             .unwrap_or_else(|error| panic!("observation failed: {error:?}"));
-        let observed =
-            XeniaJournalCheckpointV1::from_journal(&journal, &[0xCC; 32], 7, [0xDD; 32]);
+        let observed = XeniaJournalCheckpointV1::from_journal(&journal, &[0xCC; 32], 7, [0xDD; 32]);
         assert_eq!(observed.state_counts.observed, 1);
         assert_eq!(observed.state_counts.pending_observation(), 0);
         assert!(!observed.has_unresolved_effects());
