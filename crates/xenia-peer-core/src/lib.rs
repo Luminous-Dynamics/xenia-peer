@@ -52,6 +52,7 @@
 #![warn(missing_docs)]
 
 pub mod advertisement;
+pub mod effect_commit_gate;
 pub mod file_transfer;
 pub mod frame;
 pub mod handshake;
