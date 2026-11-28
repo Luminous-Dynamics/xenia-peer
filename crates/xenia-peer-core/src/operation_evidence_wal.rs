@@ -70,6 +70,18 @@ pub enum DurableOperationJournalError {
     },
     /// The journal sequence counter is exhausted.
     SequenceExhausted,
+    /// The trusted anchor points beyond the recovered journal head.
+    JournalBehindAnchor {
+        /// Sequence durably recorded by the external witness.
+        anchored_sequence: u64,
+        /// Highest locally recovered sequence.
+        recovered_sequence: u64,
+    },
+    /// The retained WAL prefix does not match the external checkpoint.
+    JournalAnchorPrefixMismatch {
+        /// Sequence where the anchored prefix differs.
+        sequence: u64,
+    },
     /// A previously durable WAL command disagreed with the in-memory state model.
     ReplayDivergence,
     /// A write/sync failed; the journal is poisoned and must be reopened.
@@ -102,6 +114,13 @@ impl fmt::Display for DurableOperationJournalError {
                 "operation WAL clock regressed from {previous} to {observed}"
             ),
             Self::SequenceExhausted => write!(f, "operation WAL sequence is exhausted"),
+            Self::JournalBehindAnchor { anchored_sequence, recovered_sequence } => write!(
+                f,
+                "operation WAL is behind anchor sequence {anchored_sequence} (recovered {recovered_sequence})"
+            ),
+            Self::JournalAnchorPrefixMismatch { sequence } => {
+                write!(f, "operation WAL does not match the trusted anchor at sequence {sequence}")
+            }
             Self::ReplayDivergence => {
                 write!(
                     f,
@@ -424,6 +443,8 @@ pub struct DurableOperationEvidenceJournal {
     last_operation_sequence: Option<u64>,
     journal_sequence: u64,
     last_record_hash: [u8; 32],
+    /// Bounded verified prefix heads, including the sequence-zero genesis.
+    prefix_heads: Vec<DurableOperationJournalHead>,
     last_event_tick: Option<u64>,
     poisoned: bool,
 }
@@ -494,6 +515,13 @@ impl DurableOperationEvidenceJournal {
             last_operation_sequence: None,
             journal_sequence: 0,
             last_record_hash: [0; 32],
+            prefix_heads: vec![DurableOperationJournalHead {
+                session_fingerprint,
+                clock_domain,
+                journal_sequence: 0,
+                wal_chain_digest: [0; 32],
+                last_operation_sequence: None,
+            }],
             last_event_tick: None,
             poisoned: false,
         };
@@ -565,6 +593,7 @@ impl DurableOperationEvidenceJournal {
             Ok(result) => {
                 self.operation_ids.insert(operation_id);
                 self.last_operation_sequence = Some(operation_sequence);
+                self.record_head_candidate();
                 Ok(result)
             }
             Err(_) => {
@@ -823,6 +852,47 @@ impl DurableOperationEvidenceJournal {
         }
     }
 
+    /// Verify that an external checkpoint is an exact prefix of this fully
+    /// replayed WAL. A later recovered head is acceptable only when it extends
+    /// the exact anchored hash/sequence/operation-sequence tuple.
+    pub fn verify_anchor_prefix(
+        &self,
+        anchor: &DurableOperationJournalHead,
+    ) -> Result<(), DurableOperationJournalError> {
+        if anchor.session_fingerprint != self.session_fingerprint {
+            return Err(DurableOperationJournalError::SessionFingerprintMismatch);
+        }
+        if anchor.clock_domain != self.clock_domain {
+            return Err(DurableOperationJournalError::ClockDomainMismatch);
+        }
+        if anchor.journal_sequence > self.journal_sequence {
+            return Err(DurableOperationJournalError::JournalBehindAnchor {
+                anchored_sequence: anchor.journal_sequence,
+                recovered_sequence: self.journal_sequence,
+            });
+        }
+        let index = usize::try_from(anchor.journal_sequence)
+            .map_err(|_| DurableOperationJournalError::JournalBehindAnchor {
+                anchored_sequence: anchor.journal_sequence,
+                recovered_sequence: self.journal_sequence,
+            })?;
+        let Some(prefix) = self.prefix_heads.get(index) else {
+            return Err(DurableOperationJournalError::JournalBehindAnchor {
+                anchored_sequence: anchor.journal_sequence,
+                recovered_sequence: self.journal_sequence,
+            });
+        };
+        if prefix.journal_sequence != anchor.journal_sequence
+            || prefix.wal_chain_digest != anchor.wal_chain_digest
+            || prefix.last_operation_sequence != anchor.last_operation_sequence
+        {
+            return Err(DurableOperationJournalError::JournalAnchorPrefixMismatch {
+                sequence: anchor.journal_sequence,
+            });
+        }
+        Ok(())
+    }
+
     /// Whether a failed append has poisoned this in-process writer.
     pub fn is_poisoned(&self) -> bool {
         self.poisoned
@@ -998,7 +1068,19 @@ impl DurableOperationEvidenceJournal {
         self.journal_sequence = next_sequence;
         self.last_record_hash = record_hash;
         self.last_event_tick = Some(at_ticks);
+        self.record_head_candidate();
         Ok(())
+    }
+
+    fn record_head_candidate(&mut self) {
+        let head = self.head_candidate();
+        if let Some(last) = self.prefix_heads.last_mut()
+            && last.journal_sequence == head.journal_sequence
+        {
+            *last = head;
+        } else {
+            self.prefix_heads.push(head);
+        }
     }
 
     fn apply_or_poison(
@@ -1067,6 +1149,7 @@ impl DurableOperationEvidenceJournal {
             self.verify_record(&record)?;
             self.replay_command(record.body.command)?;
             self.last_record_hash = record.record_hash;
+            self.record_head_candidate();
             valid_bytes = valid_bytes.saturating_add(4 + record_len as u64);
         }
 
