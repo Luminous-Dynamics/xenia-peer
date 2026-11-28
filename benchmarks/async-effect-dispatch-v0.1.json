@@ -1,0 +1,403 @@
+{
+  "schema": "xenia-async-effect-dispatch-benchmark-v0.1",
+  "status": "preregistered_unmeasured",
+  "issue": 545,
+  "purpose": "Qualify non-blocking dispatch admission, revoke ordering, cancellation-to-UNKNOWN behavior, reconciliation, and bounded overhead. No benchmark result is claimed by this artifact. Adds explicit restart semantics for durable admissions that never reached the effect owner: resume only the exact same identity under the same freshly authenticated authority epoch, while retaining the UNKNOWN barrier for all attempted-but-unresolved operations.",
+  "implementation": {
+    "module": "crates/xenia-peer-core/src/async_effect_dispatch.rs",
+    "model_only": true,
+    "live_transport_integration": false,
+    "durable_wal_integration": false,
+    "authorization_verification": "external_to_gate",
+    "evidence_signatures": "external_to_gate",
+    "operation_id_scheme": "BLAKE3-128(session fingerprint || authority epoch || lane || direction || monotonic per-session operation sequence || context digest)",
+    "active_state_retention": "prepared/in-flight/unknown only; accepted and cancelled records leave active map",
+    "reconciliation_cache": "bounded recent cache of 1024; durable WAL is long-term idempotency authority",
+    "hot_path_state_accounting": "incremental prepared/in-flight/unknown counters; admission and reactivation decisions average O(1); revoke enumerates bounded in-flight IDs O(outstanding)"
+  },
+  "invariants": {
+    "no_gate_mutex_held_across_await": true,
+    "revoke_blocks_new_begin_dispatch": true,
+    "pre_revoke_inflight_may_finish_after_revoke": true,
+    "revoke_receipt_lists_inflight_operation_ids": true,
+    "prepared_permit_drop_is_not_dispatched": true,
+    "inflight_guard_drop_becomes_unknown": true,
+    "unknown_blocks_new_mutations": true,
+    "reconciliation_requires_external_verification": true,
+    "reconciliation_is_idempotent_for_same_receipt": true,
+    "conflicting_reconciliation_fails_closed": true,
+    "transport_acceptance_does_not_claim_peer_observation": true,
+    "operation_ids_remain_consumed": true,
+    "operation_history_is_bounded": true,
+    "monotonic_operation_sequence_rejects_replay": true,
+    "completed_dispatches_do_not_consume_outstanding_capacity": true,
+    "operation_sequence_high_water_restored_before_resume": true,
+    "outstanding_capacity_bounded_independent_of_lifetime_operations": true,
+    "restart_rebuilds_unresolved_unknown_operations": true,
+    "sequence_high_water_restored_before_resume": true,
+    "recovered_unattempted_operations_resume_only_with_same_identity": true,
+    "stale_authority_unattempted_operations_never_resume": true,
+    "recovered_unattempted_and_unknown_are_distinct": true
+  },
+  "scenarios": [
+    {
+      "id": "AED-001",
+      "name": "prepare-drop-before-dispatch",
+      "expected": "CancelledBeforeDispatch",
+      "assert": [
+        "unknown_count_zero",
+        "operation_id_still_consumed"
+      ]
+    },
+    {
+      "id": "AED-002",
+      "name": "revoke-before-begin",
+      "expected": "DispatchRejected",
+      "assert": [
+        "inflight_receipt_empty",
+        "transport_future_not_invoked"
+      ]
+    },
+    {
+      "id": "AED-003",
+      "name": "begin-before-revoke",
+      "expected": "PreRevocationInFlight",
+      "assert": [
+        "revoke_receipt_contains_operation_id",
+        "completion_allowed_after_revoke"
+      ]
+    },
+    {
+      "id": "AED-004",
+      "name": "send-future-dropped",
+      "expected": "Unknown",
+      "assert": [
+        "new_prepare_blocked"
+      ]
+    },
+    {
+      "id": "AED-005",
+      "name": "send-error-with-ambiguous-write",
+      "expected": "Unknown",
+      "assert": [
+        "new_prepare_blocked",
+        "no_automatic_retry"
+      ]
+    },
+    {
+      "id": "AED-006",
+      "name": "send-api-success",
+      "expected": "AcceptedByTransport",
+      "assert": [
+        "no_peer_observation_claim"
+      ]
+    },
+    {
+      "id": "AED-007",
+      "name": "identical-reconciliation-replay",
+      "expected": "Idempotent",
+      "assert": [
+        "same_receipt_returned"
+      ]
+    },
+    {
+      "id": "AED-008",
+      "name": "conflicting-reconciliation",
+      "expected": "FailClosed",
+      "assert": [
+        "receipt_conflict_rejected"
+      ]
+    },
+    {
+      "id": "AED-009",
+      "name": "regrant-with-inflight-send",
+      "expected": "InFlightOutstanding",
+      "assert": [
+        "reactivation_rejected"
+      ]
+    },
+    {
+      "id": "AED-010",
+      "name": "regrant-with-unknown-send",
+      "expected": "UnknownOutcomeOutstanding",
+      "assert": [
+        "reactivation_rejected"
+      ]
+    },
+    {
+      "id": "AED-011",
+      "name": "revoke-begin-race",
+      "expected": "ExactlyOneLinearizationOrder",
+      "assert": [
+        "if_begin_wins_revoke_lists_inflight",
+        "if_revoke_wins_begin_rejected"
+      ]
+    },
+    {
+      "id": "AED-012",
+      "name": "duplicate-operation-id",
+      "expected": "DuplicateOperation",
+      "assert": [
+        "no_second_permit"
+      ]
+    },
+    {
+      "id": "AED-013",
+      "name": "wrong-session-or-epoch",
+      "expected": "AdmissionRejected",
+      "assert": [
+        "transport_future_not_invoked"
+      ]
+    },
+    {
+      "id": "AED-014",
+      "name": "operation-capacity-exhausted",
+      "expected": "OperationCapacityFull",
+      "assert": [
+        "no_unbounded_growth"
+      ]
+    },
+    {
+      "id": "AED-015",
+      "name": "process-crash-after-wal-attempt-before-send",
+      "expected": "ConservativeUnknownAfterRecovery",
+      "assert": [
+        "no_automatic_retry",
+        "verified_not_dispatched_can_reconcile"
+      ]
+    },
+    {
+      "id": "AED-016",
+      "name": "process-crash-after-send-before-owner-receipt",
+      "expected": "UnknownAfterRecovery",
+      "assert": [
+        "no_automatic_retry"
+      ]
+    },
+    {
+      "id": "AED-017",
+      "name": "process-crash-after-owner-receipt-before-observation",
+      "expected": "TransportAcceptedNotPeerObserved",
+      "assert": [
+        "stage_accuracy_preserved"
+      ]
+    },
+    {
+      "id": "AED-018",
+      "name": "journal-head-rollback",
+      "expected": "AnchorMismatch",
+      "assert": [
+        "old_valid_prefix_rejected_without_external_checkpoint"
+      ]
+    },
+    {
+      "id": "AED-019",
+      "name": "process-restart-restores-sequence-high-water",
+      "expected": "Old-sequence-rejected-new-sequence-admitted",
+      "assert": [
+        "durable_wal_high_water_restored",
+        "old_operation_id_not_reaccepted"
+      ]
+    },
+    {
+      "id": "AED-020",
+      "name": "same-operation-sequence-different-context",
+      "expected": "OperationIdentityMismatch",
+      "assert": [
+        "no_second_permit",
+        "transport_future_not_invoked"
+      ]
+    },
+    {
+      "id": "AED-021",
+      "name": "ten-million-sequential-completions",
+      "expected": "No-outstanding-capacity-exhaustion",
+      "assert": [
+        "active_map_returns_to_zero",
+        "accepted_total_matches_completions"
+      ]
+    },
+    {
+      "id": "AED-022",
+      "name": "restart-restores-unknown-admission-barrier",
+      "expected": "UnknownRestoredAndNewMutationBlocked",
+      "assert": [
+        "complete_wal_projection_supplied",
+        "unknown_operation_reconstructed",
+        "reconcile_exact_operation_to_release_barrier"
+      ]
+    },
+    {
+      "id": "AED-023",
+      "name": "restore-rejects-incomplete-or-forged-unknown-projection",
+      "expected": "InvalidRecoveryState",
+      "assert": [
+        "session_mismatch_rejected",
+        "operation_identity_mismatch_rejected",
+        "sequence_above_high_water_rejected",
+        "duplicate_unknown_ids_rejected"
+      ]
+    },
+    {
+      "id": "AED-024",
+      "name": "crash-after-durable-admission-before-attempt",
+      "expected": "SameIdentityMayResumeAfterFreshAuthorityCheck",
+      "assert": [
+        "no_effect_was_invoked_before_attempt_record",
+        "same_operation_id_and_sequence_required",
+        "no_new_sequence_allocated"
+      ]
+    },
+    {
+      "id": "AED-025",
+      "name": "restart-with-admitted-but-not-attempted-operation",
+      "expected": "RecoveredUnattempted",
+      "assert": [
+        "operation_reconstructed_from_complete_wal_projection",
+        "same_identity_reprepared",
+        "stale_authority_rejected"
+      ]
+    },
+    {
+      "id": "AED-026",
+      "name": "revoke-with-recovered-unattempted-operation",
+      "expected": "RecoveredAdmissionCancelled",
+      "assert": [
+        "no_dispatch_after_revoke",
+        "cancelled_before_dispatch_count_incremented",
+        "no_unknown_state_created"
+      ]
+    },
+    {
+      "id": "AED-027",
+      "name": "unattempted-and-unknown-recovery-mixed",
+      "expected": "UnknownBarrierDominates",
+      "assert": [
+        "unattempted_operation_does_not_bypass_unknown",
+        "no_mutation_admitted_until_unknown_reconciled"
+      ]
+    },
+    {
+      "id": "AED-028",
+      "name": "duplicate-id-in-recovery-projections",
+      "expected": "InvalidRecoveryState",
+      "assert": [
+        "cross_projection_duplicate_rejected",
+        "gate_does_not_start"
+      ]
+    }
+  ],
+  "benchmark_matrix": {
+    "concurrency_levels": [
+      1,
+      8,
+      32,
+      128
+    ],
+    "operation_counts": [
+      10000,
+      100000,
+      1000000,
+      10000000
+    ],
+    "workloads": [
+      "frame-60fps",
+      "telemetry-10hz",
+      "audio-50fps",
+      "file-chunk-serial",
+      "mixed-lanes"
+    ],
+    "baselines": [
+      "no-gate-direct-transport",
+      "tokio-mutex-held-across-send-future",
+      "prepare-plus-begin-plus-finish-state-machine"
+    ],
+    "failure_injection": [
+      "revoke-races-begin",
+      "future-drop",
+      "transport-error-before-first-byte",
+      "transport-error-after-partial-write",
+      "task-abort",
+      "process-kill-after-wal-attempt",
+      "reconnect-and-replay-same-operation-id"
+    ],
+    "metrics": [
+      "prepare_dispatch_latency_p50_p95_p99_p999",
+      "begin_dispatch_latency_p50_p95_p99_p999",
+      "completion_latency_p50_p95_p99_p999",
+      "revoke_latency_vs_outstanding_count",
+      "gate_cpu_per_operation",
+      "bytes_per_outstanding_operation",
+      "memory_growth_over_10m_completed_operations"
+    ]
+  },
+  "provisional_targets_not_results": {
+    "dispatch_gate_p99_us": 50,
+    "dispatch_gate_p50_us": 5,
+    "steady_state_throughput_ops_per_second": 100000,
+    "overhead_fraction_of_16_67ms_frame_budget": 0.01,
+    "unauthorized_post_revoke_dispatches": 0,
+    "automatic_retries_of_unknown_operations": 0,
+    "duplicate_operation_admissions": 0,
+    "lost_inflight_operations_in_revoke_receipt": 0,
+    "max_outstanding_dispatches": 4096,
+    "sequential_operations_without_capacity_exhaustion": 10000000
+  },
+  "measurement_requirements": {
+    "record_cpu_model_and_microcode": true,
+    "record_os_kernel_and_rust_toolchain": true,
+    "record_release_profile_and_allocator": true,
+    "record_concurrency_and_operation_mix": true,
+    "record_all_percentiles_p50_p95_p99_p999": true,
+    "record_throughput_and_cpu_per_operation": true,
+    "record_memory_per_retained_operation": true,
+    "preserve_raw_samples_and_runner_identity": true,
+    "compare_same_hardware_same_payload_same_failure_schedule": true,
+    "separate_synthetic_model_results_from_live_transport_results": true
+  },
+  "industry_comparison": {
+    "kafka": "Compare within Kafka's producer/consumer transaction boundary; do not claim cross-system exactly-once semantics.",
+    "rabbitmq": "Compare broker publisher confirms and consumer acknowledgements; distinguish broker acceptance from consumer processing.",
+    "nats_jetstream": "Compare durable stream replay/acknowledgement behavior and redelivery under restart.",
+    "postgresql": "Compare durable journal sync and recovery behavior against configured WAL/fsync/synchronous_commit semantics.",
+    "tuf": "Use persisted monotonic checkpoints and freshness/expiry checks as the rollback/freeze-resistance reference."
+  },
+  "concurrency_qualification": {
+    "loom_exhaustive_model": {
+      "status": "implemented_in_this_pr",
+      "scope": "reduced three-thread admission/completion/revoke state model",
+      "does_not_prove": "full production implementation or network behavior"
+    },
+    "production_threaded_race": {
+      "status": "implemented_in_this_pr",
+      "iterations": 32,
+      "replay": "standard Rust thread test; extend with deterministic schedule record"
+    },
+    "shuttle_random_schedule": {
+      "status": "planned_not_implemented",
+      "requirements": [
+        "persist scheduler seed",
+        "replay failing schedule",
+        "record preemption bound"
+      ]
+    },
+    "jepsen_style_black_box": {
+      "status": "planned_not_implemented",
+      "requirements": [
+        "multi-process histories",
+        "network nemesis",
+        "process kill/restart",
+        "linearizability/history checker"
+      ]
+    },
+    "foundationdb_style_deterministic_simulation": {
+      "status": "research_target",
+      "requirements": [
+        "virtual time",
+        "injectable transport and disk",
+        "seeded packet/disk/clock/process faults",
+        "deterministic replay"
+      ]
+    }
+  }
+}

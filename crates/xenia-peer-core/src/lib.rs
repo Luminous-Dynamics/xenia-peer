@@ -52,6 +52,7 @@
 #![warn(missing_docs)]
 
 pub mod advertisement;
+pub mod async_effect_dispatch;
 pub mod file_transfer;
 pub mod frame;
 pub mod handshake;
