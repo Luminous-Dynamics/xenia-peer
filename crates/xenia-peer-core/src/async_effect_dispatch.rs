@@ -293,6 +293,32 @@ pub struct DispatchReactivationReceipt {
     pub evidence_digest: [u8; 32],
 }
 
+/// An operation whose WAL-recovered latest state is UNKNOWN.
+///
+/// The request must be reconstructed from authenticated WAL identity fields,
+/// not from caller-supplied live network data.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RecoveredUnknownDispatch {
+    /// Original operation identity and authorization context.
+    pub request: DispatchRequest,
+    /// Digest of the durable UNKNOWN event created during WAL recovery.
+    pub evidence_digest: [u8; 32],
+}
+
+/// Complete recovery projection supplied after the durable WAL is verified.
+///
+/// Every attempted operation lacking a durable owner outcome must appear in
+/// unresolved_unknowns. Omitting one would incorrectly release the replay
+/// barrier, so callers must construct this only from a complete replay of the
+/// verified operation journal.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DispatchRecoveryState {
+    /// Highest durably admitted operation sequence, including terminal ops.
+    pub last_admitted_sequence: Option<u64>,
+    /// All unresolved UNKNOWN operations recovered from the durable WAL.
+    pub unresolved_unknowns: Vec<RecoveredUnknownDispatch>,
+}
+
 /// Bounded observation of the local asynchronous dispatch gate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DispatchGateSnapshot {
@@ -372,6 +398,8 @@ pub enum DispatchGateError {
     },
     /// In-flight dispatches must resolve before reactivation.
     InFlightOutstanding,
+    /// The recovered WAL projection is incomplete or internally inconsistent.
+    InvalidRecoveryState,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -422,25 +450,69 @@ pub struct TransportDispatchGate {
 }
 
 impl TransportDispatchGate {
-    /// Create a new-session gate with an initial operation sequence floor of zero.
+    /// Create a gate for a genuinely new authenticated session.
     ///
     /// Do not use this constructor to resume a prior session. Resumed sessions
-    /// must call restore with the durable operation-sequence high-water mark
-    /// recovered from the operation WAL.
+    /// must use restore with a complete projection from the verified WAL.
     pub fn new(
         session_fingerprint: [u8; 32],
         authority_epoch: u64,
     ) -> Result<Self, DispatchGateError> {
-        Self::restore(session_fingerprint, authority_epoch, 0)
+        Self::restore(
+            session_fingerprint,
+            authority_epoch,
+            DispatchRecoveryState::default(),
+        )
     }
 
-    /// Restore a gate after process restart using the last durably admitted
-    /// operation sequence recovered from the operation WAL.
+    /// Restore a gate after process restart using a complete projection of the
+    /// verified operation WAL.
+    ///
+    /// Every Attempted operation without a durable terminal owner result must
+    /// be supplied as unresolved UNKNOWN. The durable journal, not this
+    /// in-memory gate, remains the source of truth for the projection.
     pub fn restore(
         session_fingerprint: [u8; 32],
         authority_epoch: u64,
-        last_admitted_sequence: u64,
+        recovery: DispatchRecoveryState,
     ) -> Result<Self, DispatchGateError> {
+        let last_admitted_sequence = recovery.last_admitted_sequence;
+        let mut operations = HashMap::new();
+        for unknown in recovery.unresolved_unknowns {
+            let request = unknown.request;
+            let Some(high_water) = last_admitted_sequence else {
+                return Err(DispatchGateError::InvalidRecoveryState);
+            };
+            if request.session_fingerprint != session_fingerprint
+                || request.authority_epoch > authority_epoch
+                || request.operation_sequence == 0
+                || request.operation_sequence > high_water
+                || request.operation_id != derive_dispatch_operation_id(
+                    request.session_fingerprint,
+                    request.authority_epoch,
+                    request.lane,
+                    request.direction,
+                    request.operation_sequence,
+                    request.context_digest,
+                )
+                || operations.len() >= MAX_OUTSTANDING_ASYNC_DISPATCHES
+            {
+                return Err(DispatchGateError::InvalidRecoveryState);
+            }
+            let previous = operations.insert(
+                request.operation_id,
+                OperationRecord {
+                    request,
+                    state: OperationState::Unknown {
+                        evidence_digest: unknown.evidence_digest,
+                    },
+                },
+            );
+            if previous.is_some() {
+                return Err(DispatchGateError::InvalidRecoveryState);
+            }
+        }
+        let unknown_count = operations.len();
         let gate_id = NEXT_DISPATCH_GATE_ID
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
                 current.checked_add(1)
@@ -451,12 +523,12 @@ impl TransportDispatchGate {
             inner: Arc::new(Mutex::new(DispatchInner {
                 session_fingerprint,
                 authority_epoch,
-                last_admitted_sequence: Some(last_admitted_sequence),
+                last_admitted_sequence,
                 phase: GatePhase::Active,
-                operations: HashMap::new(),
+                operations,
                 prepared_count: 0,
                 in_flight_count: 0,
-                unknown_count: 0,
+                unknown_count,
                 recent_reconciliations: HashMap::new(),
                 reconciliation_order: VecDeque::new(),
                 accepted_total: 0,
