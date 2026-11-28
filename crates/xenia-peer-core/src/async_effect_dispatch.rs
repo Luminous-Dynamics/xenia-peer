@@ -305,18 +305,32 @@ pub struct RecoveredUnknownDispatch {
     pub evidence_digest: [u8; 32],
 }
 
+/// An operation durably admitted but not durably marked attempted.
+///
+/// This state is safe to resume only with the same operation identity and
+/// context, and only when the caller has freshly established the exact current
+/// authority epoch. It must never be reconstructed from a missing WAL record.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RecoveredUnattemptedDispatch {
+    /// Original operation identity and authorization context.
+    pub request: DispatchRequest,
+}
+
 /// Complete recovery projection supplied after the durable WAL is verified.
 ///
-/// Every attempted operation lacking a durable owner outcome must appear in
-/// unresolved_unknowns. Omitting one would incorrectly release the replay
-/// barrier, so callers must construct this only from a complete replay of the
-/// verified operation journal.
+/// Every attempted operation lacking a durable owner result must appear in
+/// unresolved_unknowns. Every admitted operation with no Attempted or terminal
+/// event must appear in unattempted. An omitted operation can leave a consumed
+/// sequence permanently orphaned, so callers must build both lists from a
+/// complete replay of the verified operation journal.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DispatchRecoveryState {
     /// Highest durably admitted operation sequence, including terminal ops.
     pub last_admitted_sequence: Option<u64>,
     /// All unresolved UNKNOWN operations recovered from the durable WAL.
     pub unresolved_unknowns: Vec<RecoveredUnknownDispatch>,
+    /// All durably admitted operations proven not to have reached the owner.
+    pub unattempted: Vec<RecoveredUnattemptedDispatch>,
 }
 
 /// Bounded observation of the local asynchronous dispatch gate.
@@ -328,10 +342,12 @@ pub struct DispatchGateSnapshot {
     pub authority_epoch: u64,
     /// Whether new dispatch admissions are permitted.
     pub active: bool,
-    /// Currently outstanding operation IDs (prepared, in-flight, unknown).
+    /// Currently outstanding operation IDs (prepared, recovered, in-flight, unknown).
     pub operation_count: usize,
-    /// Permits prepared but not yet admitted to dispatch.
+    /// Permits prepared but not yet dispatched.
     pub prepared_operations: usize,
+    /// Recovered admissions proven not to have been attempted.
+    pub recovered_unattempted_operations: usize,
     /// Dispatches admitted and not yet resolved.
     pub in_flight_operations: usize,
     /// Ambiguous dispatches awaiting reconciliation.
@@ -411,6 +427,7 @@ enum GatePhase {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum OperationState {
     Prepared,
+    RecoveredNotAttempted,
     InFlight,
     Unknown { evidence_digest: [u8; 32] },
 }
@@ -512,7 +529,42 @@ impl TransportDispatchGate {
                 return Err(DispatchGateError::InvalidRecoveryState);
             }
         }
-        let unknown_count = operations.len();
+        for unattempted in recovery.unattempted {
+            let request = unattempted.request;
+            let Some(high_water) = last_admitted_sequence else {
+                return Err(DispatchGateError::InvalidRecoveryState);
+            };
+            if request.session_fingerprint != session_fingerprint
+                || request.authority_epoch != authority_epoch
+                || request.operation_sequence == 0
+                || request.operation_sequence > high_water
+                || request.operation_id != derive_dispatch_operation_id(
+                    request.session_fingerprint,
+                    request.authority_epoch,
+                    request.lane,
+                    request.direction,
+                    request.operation_sequence,
+                    request.context_digest,
+                )
+                || operations.len() >= MAX_OUTSTANDING_ASYNC_DISPATCHES
+            {
+                return Err(DispatchGateError::InvalidRecoveryState);
+            }
+            let previous = operations.insert(
+                request.operation_id,
+                OperationRecord {
+                    request,
+                    state: OperationState::RecoveredNotAttempted,
+                },
+            );
+            if previous.is_some() {
+                return Err(DispatchGateError::InvalidRecoveryState);
+            }
+        }
+        let unknown_count = operations
+            .values()
+            .filter(|record| matches!(record.state, OperationState::Unknown { .. }))
+            .count();
         let gate_id = NEXT_DISPATCH_GATE_ID
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
                 current.checked_add(1)
@@ -560,17 +612,6 @@ impl TransportDispatchGate {
         if inner.unknown_count > 0 {
             return Err(DispatchGateError::UnknownOutcomeOutstanding);
         }
-        if inner.operations.contains_key(&request.operation_id) {
-            return Err(DispatchGateError::DuplicateOperation);
-        }
-        if let Some(previous) = inner.last_admitted_sequence
-            && request.operation_sequence <= previous
-        {
-            return Err(DispatchGateError::NonMonotonicOperationSequence {
-                previous,
-                observed: request.operation_sequence,
-            });
-        }
         let expected_operation_id = derive_dispatch_operation_id(
             request.session_fingerprint,
             request.authority_epoch,
@@ -581,6 +622,32 @@ impl TransportDispatchGate {
         );
         if request.operation_id != expected_operation_id {
             return Err(DispatchGateError::OperationIdentityMismatch);
+        }
+        if let Some(record) = inner.operations.get_mut(&request.operation_id) {
+            if record.request == request
+                && matches!(record.state, OperationState::RecoveredNotAttempted)
+            {
+                // The verified WAL proves this exact operation was admitted
+                // but never reached its effect owner. Resume the same identity;
+                // never allocate a replacement sequence or operation ID.
+                record.state = OperationState::Prepared;
+                inner.prepared_count = inner.prepared_count.saturating_add(1);
+                return Ok(DispatchPermit {
+                    gate_id: self.gate_id,
+                    inner: Arc::clone(&self.inner),
+                    request,
+                    consumed: false,
+                });
+            }
+            return Err(DispatchGateError::DuplicateOperation);
+        }
+        if let Some(previous) = inner.last_admitted_sequence
+            && request.operation_sequence <= previous
+        {
+            return Err(DispatchGateError::NonMonotonicOperationSequence {
+                previous,
+                observed: request.operation_sequence,
+            });
         }
         if inner.operations.len() >= MAX_OUTSTANDING_ASYNC_DISPATCHES {
             return Err(DispatchGateError::OperationCapacityFull);
@@ -673,16 +740,22 @@ impl TransportDispatchGate {
             });
         }
         let previous_epoch = inner.authority_epoch;
-        let prepared_operations: Vec<_> = inner
+        let unstarted_operations: Vec<_> = inner
             .operations
             .iter()
             .filter_map(|(operation_id, record)| {
-                matches!(record.state, OperationState::Prepared).then_some(*operation_id)
+                matches!(
+                    record.state,
+                    OperationState::Prepared | OperationState::RecoveredNotAttempted
+                )
+                .then_some((*operation_id, matches!(record.state, OperationState::Prepared)))
             })
             .collect();
-        for operation_id in prepared_operations {
+        for (operation_id, was_prepared) in unstarted_operations {
             inner.operations.remove(&operation_id);
-            inner.prepared_count = inner.prepared_count.saturating_sub(1);
+            if was_prepared {
+                inner.prepared_count = inner.prepared_count.saturating_sub(1);
+            }
             inner.cancelled_before_dispatch_total =
                 inner.cancelled_before_dispatch_total.saturating_add(1);
         }
@@ -798,6 +871,11 @@ impl TransportDispatchGate {
             active: inner.phase == GatePhase::Active,
             operation_count: inner.operations.len(),
             prepared_operations: inner.prepared_count,
+            recovered_unattempted_operations: inner
+                .operations
+                .values()
+                .filter(|record| matches!(record.state, OperationState::RecoveredNotAttempted))
+                .count(),
             in_flight_operations: inner.in_flight_count,
             unknown_operations: inner.unknown_count,
             accepted_operations: inner.accepted_total,
@@ -1273,6 +1351,7 @@ mod tests {
                     request: unknown_request,
                     evidence_digest: [40; 32],
                 }],
+                unattempted: Vec::new(),
             },
         )
         .unwrap_or_else(|error| panic!("restore failed: {error:?}"));
@@ -1303,6 +1382,133 @@ mod tests {
     }
 
     #[test]
+    fn restore_resumes_unattempted_operation_with_the_same_identity() {
+        let resumed_request = request(42);
+        let gate = TransportDispatchGate::restore(
+            [1; 32],
+            7,
+            DispatchRecoveryState {
+                last_admitted_sequence: Some(42),
+                unresolved_unknowns: Vec::new(),
+                unattempted: vec![RecoveredUnattemptedDispatch {
+                    request: resumed_request,
+                }],
+            },
+        )
+        .unwrap_or_else(|error| panic!("restore failed: {error:?}"));
+        let restored = gate
+            .snapshot()
+            .unwrap_or_else(|error| panic!("snapshot failed: {error:?}"));
+        assert_eq!(restored.operation_count, 1);
+        assert_eq!(restored.recovered_unattempted_operations, 1);
+        assert_eq!(restored.unknown_operations, 0);
+
+        let permit = gate
+            .prepare_after_admission(resumed_request)
+            .unwrap_or_else(|error| panic!("same-identity resume failed: {error:?}"));
+        let prepared = gate
+            .snapshot()
+            .unwrap_or_else(|error| panic!("snapshot failed: {error:?}"));
+        assert_eq!(prepared.prepared_operations, 1);
+        assert_eq!(prepared.recovered_unattempted_operations, 0);
+
+        let guard = gate
+            .begin_dispatch(permit)
+            .unwrap_or_else(|error| panic!("begin failed: {error:?}"));
+        let receipt = guard
+            .accepted_by_transport([43; 32])
+            .unwrap_or_else(|error| panic!("completion failed: {error:?}"));
+        assert_eq!(receipt.operation_id, resumed_request.operation_id);
+        let completed = gate
+            .snapshot()
+            .unwrap_or_else(|error| panic!("snapshot failed: {error:?}"));
+        assert_eq!(completed.operation_count, 0);
+        assert_eq!(completed.accepted_operations, 1);
+        assert_eq!(
+            gate.prepare_after_admission(resumed_request).err(),
+            Some(DispatchGateError::NonMonotonicOperationSequence {
+                previous: 42,
+                observed: 42,
+            })
+        );
+    }
+
+    #[test]
+    fn restore_rejects_unattempted_admission_from_an_old_authority_epoch() {
+        let mut stale = request(42);
+        stale.authority_epoch = 6;
+        stale.operation_id = derive_dispatch_operation_id(
+            stale.session_fingerprint,
+            stale.authority_epoch,
+            stale.lane,
+            stale.direction,
+            stale.operation_sequence,
+            stale.context_digest,
+        );
+        assert_eq!(
+            TransportDispatchGate::restore(
+                [1; 32],
+                7,
+                DispatchRecoveryState {
+                    last_admitted_sequence: Some(42),
+                    unresolved_unknowns: Vec::new(),
+                    unattempted: vec![RecoveredUnattemptedDispatch { request: stale }],
+                },
+            )
+            .err(),
+            Some(DispatchGateError::InvalidRecoveryState)
+        );
+    }
+
+    #[test]
+    fn restored_unknown_barrier_blocks_recovered_unattempted_operations() {
+        let unknown_request = request(41);
+        let unattempted_request = request(42);
+        let gate = TransportDispatchGate::restore(
+            [1; 32],
+            7,
+            DispatchRecoveryState {
+                last_admitted_sequence: Some(42),
+                unresolved_unknowns: vec![RecoveredUnknownDispatch {
+                    request: unknown_request,
+                    evidence_digest: [40; 32],
+                }],
+                unattempted: vec![RecoveredUnattemptedDispatch {
+                    request: unattempted_request,
+                }],
+            },
+        )
+        .unwrap_or_else(|error| panic!("restore failed: {error:?}"));
+        assert_eq!(
+            gate.prepare_after_admission(unattempted_request).err(),
+            Some(DispatchGateError::UnknownOutcomeOutstanding)
+        );
+    }
+
+    #[test]
+    fn restore_rejects_duplicate_identity_across_recovery_projections() {
+        let duplicate = request(42);
+        assert_eq!(
+            TransportDispatchGate::restore(
+                [1; 32],
+                7,
+                DispatchRecoveryState {
+                    last_admitted_sequence: Some(42),
+                    unresolved_unknowns: vec![RecoveredUnknownDispatch {
+                        request: duplicate,
+                        evidence_digest: [40; 32],
+                    }],
+                    unattempted: vec![RecoveredUnattemptedDispatch {
+                        request: duplicate,
+                    }],
+                },
+            )
+            .err(),
+            Some(DispatchGateError::InvalidRecoveryState)
+        );
+    }
+
+    #[test]
     fn restore_rejects_unknowns_not_bound_to_recovered_wal() {
         let mut forged = request(12);
         forged.context_digest = [200; 32];
@@ -1316,6 +1522,7 @@ mod tests {
                         request: forged,
                         evidence_digest: [40; 32],
                     }],
+                    unattempted: Vec::new(),
                 },
             )
             .err(),
