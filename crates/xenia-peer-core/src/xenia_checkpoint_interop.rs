@@ -352,6 +352,45 @@ mod tests {
     }
 
     #[test]
+    fn local_commit_remains_distinct_from_stronger_observation() {
+        let path = journal_path();
+        let session = [8; 32];
+        let mut journal = DurableOperationEvidenceJournal::open(&path, session, 33)
+            .unwrap_or_else(|error| panic!("open failed: {error:?}"));
+        let operation_id = OperationId([2; 16]);
+        journal
+            .admit(operation_id, 1, context(session, 2), 1, [11; 32])
+            .unwrap_or_else(|error| panic!("admission failed: {error:?}"));
+        journal
+            .mark_attempted(operation_id, 2, [12; 32])
+            .unwrap_or_else(|error| panic!("attempt failed: {error:?}"));
+        journal
+            .mark_committed(operation_id, 3, [13; 32])
+            .unwrap_or_else(|error| panic!("commit failed: {error:?}"));
+
+        let committed =
+            XeniaJournalCheckpointV1::from_journal(&journal, &[0xCC; 32], 7, [0xDD; 32]);
+        assert_eq!(committed.state_counts.committed, 1);
+        assert_eq!(committed.state_counts.observed, 0);
+        assert_eq!(committed.state_counts.pending_effects(), 0);
+        assert_eq!(committed.state_counts.pending_observation(), 1);
+        assert!(committed.has_pending_observation());
+        assert!(committed.has_unresolved_lifecycle());
+
+        journal
+            .mark_observed(operation_id, 4, [14; 32])
+            .unwrap_or_else(|error| panic!("observation failed: {error:?}"));
+        let observed =
+            XeniaJournalCheckpointV1::from_journal(&journal, &[0xCC; 32], 7, [0xDD; 32]);
+        assert_eq!(observed.state_counts.observed, 1);
+        assert_eq!(observed.state_counts.pending_observation(), 0);
+        assert!(!observed.has_unresolved_effects());
+        assert!(!observed.has_unresolved_lifecycle());
+        drop(journal);
+        remove_journal(&path);
+    }
+
+    #[test]
     fn checkpoint_exports_unknown_operations_without_claiming_resolution() {
         let path = journal_path();
         let session = [7; 32];
