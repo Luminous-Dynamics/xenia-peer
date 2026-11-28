@@ -55,6 +55,7 @@ pub mod advertisement;
 pub mod file_transfer;
 pub mod frame;
 pub mod handshake;
+pub mod journal_head_anchor;
 pub mod m1_session;
 pub mod operation_evidence;
 pub mod operation_evidence_wal;
