@@ -263,6 +263,11 @@ pub fn advance_checkpoint_after_external_verification<W: JournalHeadWitness>(
     Ok(JournalHeadAdvanceReceipt { previous, current })
 }
 
+/// In-memory witness test double.
+///
+/// This mock exists only to exercise the witness protocol's state transitions.
+/// It is not durable, independently administered, rollback-resistant, or
+/// suitable for production trust anchoring.
 #[cfg(test)]
 #[derive(Clone, Default)]
 pub struct MemoryJournalHeadWitness {
