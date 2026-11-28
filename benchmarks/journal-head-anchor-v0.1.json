@@ -113,6 +113,21 @@
       "id": "JHA-018",
       "name": "per-session-operation-capacity",
       "expected": "FailClosedAtExisting4096OperationBound"
+    },
+    {
+      "id": "JHA-019",
+      "name": "stream-lease-revoked-mid-range",
+      "expected": "No-new-begin-after-revoke; in-flight-range-recorded; remainder-rejected"
+    },
+    {
+      "id": "JHA-020",
+      "name": "receiver-replay-after-stream-process-rollback",
+      "expected": "Old-sequence-rejected-by-durable-receiver-high-water"
+    },
+    {
+      "id": "JHA-021",
+      "name": "batch-root-does-not-claim-frame-observation",
+      "expected": "TransportAcceptedDistinctFromPeerObserved"
     }
   ],
   "benchmarks": {
@@ -143,6 +158,16 @@
       "memory_bytes_per_prefix_index_entry",
       "recovery_time_after_process_restart_ms",
       "end_to_end_effect_admission_time_ms"
+    ],
+    "anchor_modes": [
+      "per-operation-witness-cas-before-effect",
+      "bounded-signed-stream-lease-with-batch-root",
+      "local-only-unanchored-negative-control"
+    ],
+    "lane_profiles": [
+      "input-clipboard-file-high-risk",
+      "video-60fps-audio-stream",
+      "telemetry-control-plane"
     ]
   },
   "provisional_targets_not_results": {
