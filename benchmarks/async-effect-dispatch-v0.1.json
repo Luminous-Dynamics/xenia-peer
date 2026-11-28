@@ -32,7 +32,9 @@
     "monotonic_operation_sequence_rejects_replay": true,
     "completed_dispatches_do_not_consume_outstanding_capacity": true,
     "operation_sequence_high_water_restored_before_resume": true,
-    "outstanding_capacity_bounded_independent_of_lifetime_operations": true
+    "outstanding_capacity_bounded_independent_of_lifetime_operations": true,
+    "restart_rebuilds_unresolved_unknown_operations": true,
+    "sequence_high_water_restored_before_resume": true
   },
   "scenarios": [
     {
@@ -210,6 +212,27 @@
       "assert": [
         "active_map_returns_to_zero",
         "accepted_total_matches_completions"
+      ]
+    },
+    {
+      "id": "AED-022",
+      "name": "restart-restores-unknown-admission-barrier",
+      "expected": "UnknownRestoredAndNewMutationBlocked",
+      "assert": [
+        "complete_wal_projection_supplied",
+        "unknown_operation_reconstructed",
+        "reconcile_exact_operation_to_release_barrier"
+      ]
+    },
+    {
+      "id": "AED-023",
+      "name": "restore-rejects-incomplete-or-forged-unknown-projection",
+      "expected": "InvalidRecoveryState",
+      "assert": [
+        "session_mismatch_rejected",
+        "operation_identity_mismatch_rejected",
+        "sequence_above_high_water_rejected",
+        "duplicate_unknown_ids_rejected"
       ]
     }
   ],
