@@ -1262,9 +1262,36 @@ mod tests {
     }
 
     #[test]
-    fn restore_uses_durable_operation_sequence_high_water() {
-        let gate = TransportDispatchGate::restore([1; 32], 7, 42)
-            .unwrap_or_else(|error| panic!("restore failed: {error:?}"));
+    fn restore_uses_durable_sequence_and_reinstates_unknown_barrier() {
+        let unknown_request = request(12);
+        let gate = TransportDispatchGate::restore(
+            [1; 32],
+            7,
+            DispatchRecoveryState {
+                last_admitted_sequence: Some(42),
+                unresolved_unknowns: vec![RecoveredUnknownDispatch {
+                    request: unknown_request,
+                    evidence_digest: [40; 32],
+                }],
+            },
+        )
+        .unwrap_or_else(|error| panic!("restore failed: {error:?}"));
+        assert_eq!(
+            gate.prepare_after_admission(request(42)).err(),
+            Some(DispatchGateError::UnknownOutcomeOutstanding)
+        );
+        let snapshot = gate
+            .snapshot()
+            .unwrap_or_else(|error| panic!("snapshot failed: {error:?}"));
+        assert_eq!(snapshot.unknown_operations, 1);
+        assert_eq!(snapshot.operation_count, 1);
+
+        gate.reconcile_unknown(
+            unknown_request.operation_id,
+            DispatchReconciliationOutcome::NotDispatched,
+            [41; 32],
+        )
+        .unwrap_or_else(|error| panic!("reconciliation failed: {error:?}"));
         assert_eq!(
             gate.prepare_after_admission(request(42)).err(),
             Some(DispatchGateError::NonMonotonicOperationSequence {
@@ -1273,6 +1300,27 @@ mod tests {
             })
         );
         assert!(gate.prepare_after_admission(request(43)).is_ok());
+    }
+
+    #[test]
+    fn restore_rejects_unknowns_not_bound_to_recovered_wal() {
+        let mut forged = request(12);
+        forged.context_digest = [200; 32];
+        assert_eq!(
+            TransportDispatchGate::restore(
+                [1; 32],
+                7,
+                DispatchRecoveryState {
+                    last_admitted_sequence: Some(42),
+                    unresolved_unknowns: vec![RecoveredUnknownDispatch {
+                        request: forged,
+                        evidence_digest: [40; 32],
+                    }],
+                },
+            )
+            .err(),
+            Some(DispatchGateError::InvalidRecoveryState)
+        );
     }
 
     #[test]
