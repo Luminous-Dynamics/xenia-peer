@@ -13,7 +13,7 @@
 //! sign exports, or prove remote presentation. The caller must still establish
 //! consent/authority and supply trustworthy effect-owner receipts.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufReader, Read, Seek, SeekFrom, Write};
@@ -425,6 +425,7 @@ pub struct DurableOperationEvidenceJournal {
     journal_sequence: u64,
     last_record_hash: [u8; 32],
     last_event_tick: Option<u64>,
+    verified_prefix_heads: HashMap<u64, DurableOperationJournalHead>,
     poisoned: bool,
 }
 
@@ -495,8 +496,10 @@ impl DurableOperationEvidenceJournal {
             journal_sequence: 0,
             last_record_hash: [0; 32],
             last_event_tick: None,
+            verified_prefix_heads: HashMap::new(),
             poisoned: false,
         };
+        journal.record_verified_head();
         if !path_existed {
             sync_parent_directory(&journal.path)?;
         }
@@ -565,6 +568,7 @@ impl DurableOperationEvidenceJournal {
             Ok(result) => {
                 self.operation_ids.insert(operation_id);
                 self.last_operation_sequence = Some(operation_sequence);
+                self.record_verified_head();
                 Ok(result)
             }
             Err(_) => {
@@ -799,6 +803,24 @@ impl DurableOperationEvidenceJournal {
         self.journal_sequence
     }
 
+    /// Return a head that was captured at an exact WAL sequence during
+    /// successful append or complete verified replay.
+    ///
+    /// This lets an external anchor verifier prove that a local WAL which has
+    /// advanced beyond a trusted checkpoint still contains the exact anchored
+    /// prefix. A caller must not synthesize this value from unverified bytes.
+    pub fn verified_head_at_sequence(
+        &self,
+        sequence: u64,
+    ) -> Option<DurableOperationJournalHead> {
+        self.verified_prefix_heads.get(&sequence).copied()
+    }
+
+    fn record_verified_head(&mut self) {
+        self.verified_prefix_heads
+            .insert(self.journal_sequence, self.head_candidate());
+    }
+
     /// Export a payload-free candidate head for an independent anchor service.
     ///
     /// A caller must not treat this local unkeyed digest as a trust anchor until
@@ -996,7 +1018,10 @@ impl DurableOperationEvidenceJournal {
         result: Result<OperationSnapshot, OperationEvidenceError>,
     ) -> Result<OperationSnapshot, DurableOperationJournalError> {
         match result {
-            Ok(snapshot) => Ok(snapshot),
+            Ok(snapshot) => {
+                self.record_verified_head();
+                Ok(snapshot)
+            },
             Err(_) => {
                 self.poisoned = true;
                 Err(DurableOperationJournalError::ReplayDivergence)
@@ -1057,6 +1082,7 @@ impl DurableOperationEvidenceJournal {
             self.verify_record(&record)?;
             self.replay_command(record.body.command)?;
             self.last_record_hash = record.record_hash;
+            self.record_verified_head();
             valid_bytes = valid_bytes.saturating_add(4 + record_len as u64);
         }
 
