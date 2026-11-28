@@ -473,6 +473,54 @@ mod tests {
     }
 
     #[test]
+    fn journal_prefix_index_is_reconstructed_after_restart() {
+        let path = test_path();
+        let session = [6; 32];
+        let anchor;
+        {
+            let mut journal = DurableOperationEvidenceJournal::open(&path, session, 22)
+                .unwrap_or_else(|error| panic!("open failed: {error:?}"));
+            journal
+                .admit(OperationId([5; 16]), 5, context(session, 5), 1, [8; 32])
+                .unwrap_or_else(|error| panic!("admission failed: {error:?}"));
+            anchor = journal.head_candidate();
+        }
+        let recovered = DurableOperationEvidenceJournal::open(&path, session, 22)
+            .unwrap_or_else(|error| panic!("reopen failed: {error:?}"));
+        assert!(recovered.verify_anchor_prefix(&anchor).is_ok());
+        drop(recovered);
+        remove_journal(&path);
+    }
+
+    #[test]
+    fn journal_prefix_check_rejects_forked_digest_and_sequence() {
+        let path = test_path();
+        let session = [7; 32];
+        let mut journal = DurableOperationEvidenceJournal::open(&path, session, 23)
+            .unwrap_or_else(|error| panic!("open failed: {error:?}"));
+        journal
+            .admit(OperationId([6; 16]), 6, context(session, 6), 1, [9; 32])
+            .unwrap_or_else(|error| panic!("admission failed: {error:?}"));
+        let anchor = journal.head_candidate();
+
+        let mut wrong_digest = anchor;
+        wrong_digest.wal_chain_digest = [0xA5; 32];
+        assert!(matches!(
+            journal.verify_anchor_prefix(&wrong_digest),
+            Err(DurableOperationJournalError::JournalAnchorPrefixMismatch { sequence: 1 })
+        ));
+
+        let mut wrong_operation_sequence = anchor;
+        wrong_operation_sequence.last_operation_sequence = Some(99);
+        assert!(matches!(
+            journal.verify_anchor_prefix(&wrong_operation_sequence),
+            Err(DurableOperationJournalError::JournalAnchorPrefixMismatch { sequence: 1 })
+        ));
+        drop(journal);
+        remove_journal(&path);
+    }
+
+    #[test]
     fn witness_compare_and_swap_rejects_stale_generation() {
         let path = test_path();
         let session = [5; 32];
