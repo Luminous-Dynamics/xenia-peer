@@ -1486,6 +1486,38 @@ mod tests {
     }
 
     #[test]
+    fn revocation_cancels_recovered_unattempted_admissions() {
+        let unattempted_request = request(42);
+        let gate = TransportDispatchGate::restore(
+            [1; 32],
+            7,
+            DispatchRecoveryState {
+                last_admitted_sequence: Some(42),
+                unresolved_unknowns: Vec::new(),
+                unattempted: vec![RecoveredUnattemptedDispatch {
+                    request: unattempted_request,
+                }],
+            },
+        )
+        .unwrap_or_else(|error| panic!("restore failed: {error:?}"));
+        gate.revoke(8, [44; 32])
+            .unwrap_or_else(|error| panic!("revoke failed: {error:?}"));
+        let revoked = gate
+            .snapshot()
+            .unwrap_or_else(|error| panic!("snapshot failed: {error:?}"));
+        assert_eq!(revoked.recovered_unattempted_operations, 0);
+        assert_eq!(revoked.operation_count, 0);
+        assert_eq!(revoked.cancelled_before_dispatch, 1);
+        gate.reactivate_after_regrant(9, [45; 32])
+            .unwrap_or_else(|error| panic!("regrant failed: {error:?}"));
+        assert!(
+            gate.snapshot()
+                .unwrap_or_else(|error| panic!("snapshot failed: {error:?}"))
+                .active
+        );
+    }
+
+    #[test]
     fn restore_rejects_duplicate_identity_across_recovery_projections() {
         let duplicate = request(42);
         assert_eq!(
