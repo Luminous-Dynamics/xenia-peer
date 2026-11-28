@@ -385,8 +385,9 @@ version = "1.1.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.clipboard-win]]
-version = "5.4.1"
+version = "5.4.3"
 criteria = "safe-to-deploy"
+notes = "Local source-delta review against 5.4.1; exact commits, reviewed changes and limitations are documented in docs/security/audits/clipboard-win-5.4.3.md."
 
 [[exemptions.cmake]]
 version = "0.1.58"
