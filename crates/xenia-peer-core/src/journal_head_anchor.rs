@@ -173,6 +173,16 @@ pub fn verify_journal_head<W: JournalHeadWitness>(
             Ok((JournalHeadVerification::InitializedEmptyJournal, stored))
         }
         Some(checkpoint) => {
+            if checkpoint.head.session_fingerprint != candidate.session_fingerprint {
+                return Err(JournalHeadAnchorError::Journal(
+                    DurableOperationJournalError::SessionFingerprintMismatch,
+                ));
+            }
+            if checkpoint.head.clock_domain != candidate.clock_domain {
+                return Err(JournalHeadAnchorError::Journal(
+                    DurableOperationJournalError::ClockDomainMismatch,
+                ));
+            }
             if candidate.journal_sequence < checkpoint.head.journal_sequence {
                 return Err(JournalHeadAnchorError::RollbackDetected {
                     anchored_sequence: checkpoint.head.journal_sequence,
@@ -290,7 +300,11 @@ impl JournalHeadWitness for MemoryJournalHeadWitness {
             .map_err(|_| JournalHeadWitnessError::LockPoisoned)?;
         let current = state.get(&session_fingerprint).copied();
         match (expected_generation, current) {
-            (None, None) if next.generation == 1 && next.head.journal_sequence == 0 => {}
+            (None, None)
+                if next.generation == 1
+                    && next.head.journal_sequence == 0
+                    && next.head.wal_chain_digest == [0; 32]
+                    && next.head.last_operation_sequence.is_none() => {}
             (Some(expected), Some(existing)) if existing.generation == expected => {
                 if Some(next.generation) != expected.checked_add(1)
                     || next.head.clock_domain != existing.head.clock_domain
