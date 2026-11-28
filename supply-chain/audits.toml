@@ -12,3 +12,9 @@ who = "tstoltz <tstoltz@luminous-dynamics.local>"
 criteria = "safe-to-deploy"
 delta = "1.2.1 -> 1.2.2"
 notes = "Reviewed webbrowser 1.2.1 -> 1.2.2 delta for safe-to-deploy. Unix BROWSER handling now tokenizes the command template before URL substitution, preventing URL-controlled whitespace from introducing additional browser arguments. Also reviewed the macOS CoreFoundation -> objc2/NSWorkspace migration and its unsafe launch call; no new shell interpolation, attacker-controlled raw pointers, or surprising ambient capability escalation identified."
+
+[[audits.clipboard-win]]
+who = "tstoltz <tstoltz@luminous-dynamics.local>"
+criteria = "safe-to-deploy"
+delta = "5.4.1 -> 5.4.3"
+notes = "Local maintainer source-delta review recorded in docs/security/audits/clipboard-win-5.4.3.md. Reviewed exact upstream source commits and registry checksum; no new dependencies; checked changed HTML clipboard fragment range handling (5.4.3 replaces unchecked pointer copy with bounds-checked slice lookup) and retry delay change. Existing Win32 unsafe surface is inherited and not newly audited; Windows runtime malformed-offset/clipboard tests remain a separate qualification requirement. This is a version-specific local review, not an external audit or blanket approval of future releases."
