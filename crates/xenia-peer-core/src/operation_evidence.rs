@@ -548,6 +548,17 @@ impl OperationEvidenceLedger {
             .ok_or(OperationEvidenceError::UnknownOperation)
     }
 
+    /// Return a complete, deterministic snapshot of all admitted operations.
+    ///
+    /// The result is ordered by the strictly increasing operation sequence.
+    /// This is intended for verified recovery projection; callers must still
+    /// bind each snapshot to authenticated authority and operation identity.
+    pub fn snapshots(&self) -> Vec<OperationSnapshot> {
+        let mut snapshots: Vec<_> = self.records.values().copied().collect();
+        snapshots.sort_by_key(|snapshot| snapshot.operation_sequence);
+        snapshots
+    }
+
     /// Read the append-only event sequence.
     pub fn events(&self) -> &[OperationEvidenceEvent] {
         &self.events
