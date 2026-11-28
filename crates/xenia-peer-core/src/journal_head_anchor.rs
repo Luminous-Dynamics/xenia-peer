@@ -18,7 +18,9 @@
 //! before requesting a checkpoint advance. This is essential: an unanchored
 //! suffix can be rewritten by an actor who controls the WAL file.
 
+#[cfg(test)]
 use std::collections::HashMap;
+#[cfg(test)]
 use std::sync::{Arc, Mutex};
 
 use crate::operation_evidence_wal::{
