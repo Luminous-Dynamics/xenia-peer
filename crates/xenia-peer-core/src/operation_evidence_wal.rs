@@ -114,12 +114,18 @@ impl fmt::Display for DurableOperationJournalError {
                 "operation WAL clock regressed from {previous} to {observed}"
             ),
             Self::SequenceExhausted => write!(f, "operation WAL sequence is exhausted"),
-            Self::JournalBehindAnchor { anchored_sequence, recovered_sequence } => write!(
+            Self::JournalBehindAnchor {
+                anchored_sequence,
+                recovered_sequence,
+            } => write!(
                 f,
                 "operation WAL is behind anchor sequence {anchored_sequence} (recovered {recovered_sequence})"
             ),
             Self::JournalAnchorPrefixMismatch { sequence } => {
-                write!(f, "operation WAL does not match the trusted anchor at sequence {sequence}")
+                write!(
+                    f,
+                    "operation WAL does not match the trusted anchor at sequence {sequence}"
+                )
             }
             Self::ReplayDivergence => {
                 write!(
@@ -866,11 +872,12 @@ impl DurableOperationEvidenceJournal {
                 recovered_sequence: self.journal_sequence,
             });
         }
-        let index = usize::try_from(anchor.journal_sequence)
-            .map_err(|_| DurableOperationJournalError::JournalBehindAnchor {
+        let index = usize::try_from(anchor.journal_sequence).map_err(|_| {
+            DurableOperationJournalError::JournalBehindAnchor {
                 anchored_sequence: anchor.journal_sequence,
                 recovered_sequence: self.journal_sequence,
-            })?;
+            }
+        })?;
         let Some(prefix) = self.prefix_heads.get(index) else {
             return Err(DurableOperationJournalError::JournalBehindAnchor {
                 anchored_sequence: anchor.journal_sequence,
