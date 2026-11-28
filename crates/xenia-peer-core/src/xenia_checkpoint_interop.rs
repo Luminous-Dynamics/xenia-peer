@@ -267,6 +267,21 @@ mod tests {
         let _ = fs::remove_file(path);
     }
 
+    fn build_checkpoint(
+        journal: &DurableOperationEvidenceJournal,
+        scope_key: &[u8; 32],
+        authority_epoch: u64,
+        policy_digest: [u8; 32],
+    ) -> XeniaJournalCheckpointV1 {
+        XeniaJournalCheckpointV1::from_journal(
+            journal,
+            scope_key,
+            authority_epoch,
+            policy_digest,
+        )
+        .unwrap_or_else(|error| panic!("checkpoint build failed: {error:?}"))
+    }
+
     #[test]
     fn canonical_checkpoint_matches_shared_cross_language_golden_vector() {
         const FIXTURE: &str = include_str!("../../../fixtures/xenia-myclix-checkpoint-v1.kat");
@@ -316,11 +331,11 @@ mod tests {
             .admit(OperationId([1; 16]), 1, context(session, 1), 1, [5; 32])
             .unwrap_or_else(|error| panic!("admission failed: {error:?}"));
         let checkpoint =
-            XeniaJournalCheckpointV1::from_journal(&journal, &[0xB2; 32], 7, [0xC3; 32]);
+            build_checkpoint(&journal, &[0xB2; 32], 7, [0xC3; 32]);
         let bytes = checkpoint.canonical_bytes();
         assert_eq!(
             checkpoint,
-            XeniaJournalCheckpointV1::from_journal(&journal, &[0xB2; 32], 7, [0xC3; 32])
+            build_checkpoint(&journal, &[0xB2; 32], 7, [0xC3; 32])
         );
         assert!(
             !bytes.windows(32).any(|window| window == session),
@@ -409,7 +424,7 @@ mod tests {
             .unwrap_or_else(|error| panic!("commit failed: {error:?}"));
 
         let committed =
-            XeniaJournalCheckpointV1::from_journal(&journal, &[0xCC; 32], 7, [0xDD; 32]);
+            build_checkpoint(&journal, &[0xCC; 32], 7, [0xDD; 32]);
         assert_eq!(committed.state_counts.committed, 1);
         assert_eq!(committed.state_counts.observed, 0);
         assert_eq!(committed.state_counts.pending_effects(), 0);
@@ -420,7 +435,7 @@ mod tests {
         journal
             .mark_observed(operation_id, 4, [14; 32])
             .unwrap_or_else(|error| panic!("observation failed: {error:?}"));
-        let observed = XeniaJournalCheckpointV1::from_journal(&journal, &[0xCC; 32], 7, [0xDD; 32]);
+        let observed = build_checkpoint(&journal, &[0xCC; 32], 7, [0xDD; 32]);
         assert_eq!(observed.state_counts.observed, 1);
         assert_eq!(observed.state_counts.pending_observation(), 0);
         assert!(!observed.has_unresolved_effects());
@@ -445,7 +460,7 @@ mod tests {
             .mark_unknown(OperationId([1; 16]), 3, [10; 32])
             .unwrap_or_else(|error| panic!("unknown failed: {error:?}"));
         let checkpoint =
-            XeniaJournalCheckpointV1::from_journal(&journal, &[0xAA; 32], 7, [0xBB; 32]);
+            build_checkpoint(&journal, &[0xAA; 32], 7, [0xBB; 32]);
         assert_eq!(checkpoint.state_counts.unknown, 1);
         assert_eq!(checkpoint.state_counts.pending_effects(), 1);
         assert!(checkpoint.has_unresolved_effects());
