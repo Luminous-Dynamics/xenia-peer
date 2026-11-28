@@ -1,0 +1,168 @@
+{
+  "schema": "xenia-quic-envelope-cancellation-workloads/v1",
+  "status": "synthetic_state_and_failure_fixtures_only",
+  "purpose": "Define fail-closed envelope framing semantics under I/O error, cancellation, partial progress and split transport.",
+  "pinned_dependency": {
+    "crate": "iroh",
+    "version": "1.0.2",
+    "evidence": "Cargo.lock on main at research time; docs.rs iroh 1.0.2 SendStream API",
+    "write_cancel_safety": {
+      "write": "cancel_safe_returns_progress_count",
+      "write_all": "not_cancel_safe_may_write_prefix"
+    },
+    "read_cancel_safety": {
+      "tokio_read_exact": "not_cancel_safe_may_consume_partial_bytes"
+    }
+  },
+  "invariants": {
+    "envelope_format": "u32_be_length_prefix_then_payload",
+    "any_send_timeout_after_write_start_terminates_send_side": true,
+    "any_send_io_error_after_write_start_terminates_send_side": true,
+    "any_receive_error_or_timeout_terminates_receive_side": true,
+    "no_stream_reuse_after_unknown_frame_offset": true,
+    "reject_oversize_before_write_without_poisoning_stream": true,
+    "terminal_state_survives_transport_split": true,
+    "no_generic_resynchronization_scanning": true
+  },
+  "scenarios": [
+    {
+      "id": "QEIO-001",
+      "name": "normal-two-envelope-sequence",
+      "steps": [
+        "send_envelope_a_success",
+        "send_envelope_b_success",
+        "receive_a",
+        "receive_b"
+      ],
+      "expected": "Both envelopes preserve framing"
+    },
+    {
+      "id": "QEIO-002",
+      "name": "oversized-envelope-prewrite-rejection",
+      "steps": [
+        "validate_oversize",
+        "reject",
+        "send_small_envelope"
+      ],
+      "expected": "Small envelope remains eligible"
+    },
+    {
+      "id": "QEIO-003",
+      "name": "partial-length-write-timeout",
+      "steps": [
+        "write_length_prefix_partial",
+        "write_pending_times_out",
+        "finish_send_stream",
+        "attempt_next_send"
+      ],
+      "expected": "Timeout then terminal UnexpectedEof"
+    },
+    {
+      "id": "QEIO-004",
+      "name": "partial-payload-write-timeout",
+      "steps": [
+        "write_full_length",
+        "write_payload_prefix",
+        "payload_write_times_out",
+        "finish_send_stream",
+        "attempt_next_send"
+      ],
+      "expected": "Timeout then terminal UnexpectedEof"
+    },
+    {
+      "id": "QEIO-005",
+      "name": "io-error-after-partial-write",
+      "steps": [
+        "write_prefix",
+        "write_payload_prefix",
+        "write_errors",
+        "finish_send_stream"
+      ],
+      "expected": "Terminal send side"
+    },
+    {
+      "id": "QEIO-006",
+      "name": "receiver-times-out-inside-length-prefix",
+      "steps": [
+        "read_length_prefix_partial",
+        "read_timeout",
+        "mark_receive_terminal",
+        "read_again",
+        "stop_receive_stream_code_0"
+      ],
+      "expected": "Terminal UnexpectedEof"
+    },
+    {
+      "id": "QEIO-007",
+      "name": "receiver-times-out-inside-payload",
+      "steps": [
+        "read_full_length",
+        "read_payload_partial",
+        "read_timeout",
+        "mark_receive_terminal",
+        "read_again",
+        "stop_receive_stream_code_0"
+      ],
+      "expected": "Terminal UnexpectedEof"
+    },
+    {
+      "id": "QEIO-008",
+      "name": "receiver-observes-truncated-envelope-after-finish",
+      "steps": [
+        "sender_finishes_after_partial_envelope",
+        "read_exact_fails",
+        "mark_receive_terminal"
+      ],
+      "expected": "No next envelope parsing"
+    },
+    {
+      "id": "QEIO-009",
+      "name": "split-preserves-terminal-state",
+      "steps": [
+        "mark_send_terminal",
+        "split_transport",
+        "send_on_half"
+      ],
+      "expected": "UnexpectedEof"
+    },
+    {
+      "id": "QEIO-010",
+      "name": "split-preserves-receive-terminal-state",
+      "steps": [
+        "mark_receive_terminal",
+        "split_transport",
+        "receive_on_half"
+      ],
+      "expected": "UnexpectedEof"
+    },
+    {
+      "id": "QEIO-011",
+      "name": "outer-caller-cancels-send-after-partial-envelope",
+      "steps": [
+        "send_envelope_future_writes_length_prefix",
+        "outer_select_or_task_abort_drops_future",
+        "send_guard_drop_finishes_stream",
+        "next_send"
+      ],
+      "expected": "DirectionTerminalUnexpectedEof"
+    },
+    {
+      "id": "QEIO-012",
+      "name": "outer-caller-cancels-receive-after-partial-read",
+      "steps": [
+        "recv_envelope_future_consumes_partial_length_or_payload",
+        "outer_select_or_task_abort_drops_future",
+        "receive_guard_drop_stop_sending",
+        "next_receive"
+      ],
+      "expected": "DirectionTerminalUnexpectedEof"
+    }
+  ],
+  "performance_results": null,
+  "limitations": [
+    "Synthetic cases are not executed tests",
+    "No network loopback fault injection is included",
+    "No retry or automatic resynchronization is allowed",
+    "Application-level operation reconciliation remains separate"
+  ]
+}

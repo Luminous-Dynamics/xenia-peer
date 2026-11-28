@@ -34,7 +34,7 @@ use std::time::Duration;
 
 use iroh::{
     Endpoint, EndpointAddr,
-    endpoint::{Connection, RecvStream, SendStream, presets},
+    endpoint::{Connection, RecvStream, SendStream, VarInt, presets},
 };
 use thiserror::Error;
 use tracing::debug;
@@ -125,12 +125,20 @@ pub struct QuicTransport {
     conn: Connection,
     send: SendStream,
     recv: RecvStream,
+    send_terminal: bool,
+    recv_terminal: bool,
 }
 
 impl QuicTransport {
     /// Wrap an already-opened bidirectional stream.
     pub fn new(conn: Connection, send: SendStream, recv: RecvStream) -> Self {
-        Self { conn, send, recv }
+        Self {
+            conn,
+            send,
+            recv,
+            send_terminal: false,
+            recv_terminal: false,
+        }
     }
 
     /// Connect to an Iroh endpoint address and open the transport stream.
@@ -211,6 +219,7 @@ impl QuicTransport {
 
     /// Gracefully finish the sending side of the transport stream.
     pub fn finish(&mut self) -> Result<(), TransportError> {
+        self.send_terminal = true;
         self.send
             .finish()
             .map_err(|e| TransportError::from(QuicError::Io(e.to_string())))
@@ -232,8 +241,12 @@ impl QuicTransport {
             QuicSendHalf {
                 conn: self.conn,
                 send: self.send,
+                terminal: self.send_terminal,
             },
-            QuicRecvHalf { recv: self.recv },
+            QuicRecvHalf {
+                recv: self.recv,
+                terminal: self.recv_terminal,
+            },
         )
     }
 
@@ -266,10 +279,96 @@ fn is_stream_eof(msg: &str) -> bool {
     msg.contains("end of stream") || msg.contains("closed") || msg.contains("reset")
 }
 
-/// Write one length-prefixed envelope to a QUIC send stream. Shared by
-/// [`QuicTransport`] and [`QuicSendHalf`].
+/// Write all bytes using cancellation-safe, progress-reporting QUIC writes.
+///
+/// Each successful call reports exactly how much progress was made. If the
+/// surrounding deadline expires after one or more partial writes, the caller
+/// must terminate the stream because the current length-prefixed envelope is
+/// incomplete.
+async fn write_all_cancel_safe(
+    send: &mut SendStream,
+    mut bytes: &[u8],
+) -> Result<(), TransportError> {
+    while !bytes.is_empty() {
+        let written = send
+            .write(bytes)
+            .await
+            .map_err(|error| TransportError::from(QuicError::Io(error.to_string())))?;
+        if written == 0 {
+            return Err(TransportError::Io(io::Error::new(
+                io::ErrorKind::WriteZero,
+                "QUIC stream made no write progress",
+            )));
+        }
+        bytes = &bytes[written..];
+    }
+    Ok(())
+}
+
+/// Reject any further operation after a framed read/write was cancelled.
+fn ensure_stream_side_open(terminal: bool) -> Result<(), TransportError> {
+    if terminal {
+        Err(TransportError::UnexpectedEof)
+    } else {
+        Ok(())
+    }
+}
+
+/// RAII guard for one in-flight framed operation on a QUIC stream direction.
+///
+/// If the future is dropped before `complete`, the direction is marked
+/// terminal and the supplied synchronous cleanup function closes/stops it.
+struct StreamSideGuard<'a, S, F>
+where
+    F: FnMut(&mut S),
+{
+    stream: &'a mut S,
+    terminal: &'a mut bool,
+    terminate: F,
+    completed: bool,
+}
+
+impl<'a, S, F> StreamSideGuard<'a, S, F>
+where
+    F: FnMut(&mut S),
+{
+    fn new(stream: &'a mut S, terminal: &'a mut bool, terminate: F) -> Self {
+        Self {
+            stream,
+            terminal,
+            terminate,
+            completed: false,
+        }
+    }
+
+    fn stream_mut(&mut self) -> &mut S {
+        self.stream
+    }
+
+    fn complete(&mut self) {
+        self.completed = true;
+    }
+}
+
+impl<S, F> Drop for StreamSideGuard<'_, S, F>
+where
+    F: FnMut(&mut S),
+{
+    fn drop(&mut self) {
+        if !self.completed {
+            *self.terminal = true;
+            (self.terminate)(self.stream);
+        }
+    }
+}
+
+/// Write one length-prefixed envelope to a QUIC stream.
+///
+/// The guard terminates the send direction if this future is cancelled by
+/// any caller while an envelope is incomplete, not only on an internal timeout.
 async fn write_envelope_with_timeout(
     send: &mut SendStream,
+    terminal: &mut bool,
     bytes: &[u8],
     timeout: Duration,
 ) -> Result<(), TransportError> {
@@ -277,25 +376,52 @@ async fn write_envelope_with_timeout(
     if len > MAX_ENVELOPE_BYTES {
         return Err(TransportError::EnvelopeTooLarge(len));
     }
+    ensure_stream_side_open(*terminal)?;
 
-    tokio::time::timeout(timeout, async {
-        send.write_all(&len.to_be_bytes())
-            .await
-            .map_err(|e| TransportError::from(QuicError::Io(e.to_string())))?;
-        send.write_all(bytes)
-            .await
-            .map_err(|e| TransportError::from(QuicError::Io(e.to_string())))?;
-        Ok(())
+    let mut guard = StreamSideGuard::new(send, terminal, |stream: &mut SendStream| {
+        let _ = stream.finish();
+    });
+    let result = tokio::time::timeout(timeout, async {
+        write_all_cancel_safe(guard.stream_mut(), &len.to_be_bytes()).await?;
+        write_all_cancel_safe(guard.stream_mut(), bytes).await
     })
-    .await
-    .map_err(|_| TransportError::TimedOut {
-        operation: "send_envelope",
-        timeout_ms: timeout.as_millis().try_into().unwrap_or(u64::MAX),
-    })?
+    .await;
+
+    match result {
+        Ok(Ok(())) => {
+            guard.complete();
+            Ok(())
+        }
+        Ok(Err(error)) => Err(error),
+        Err(_) => Err(TransportError::TimedOut {
+            operation: "send_envelope",
+            timeout_ms: timeout.as_millis().try_into().unwrap_or(u64::MAX),
+        }),
+    }
 }
 
-async fn write_envelope(send: &mut SendStream, bytes: &[u8]) -> Result<(), TransportError> {
-    write_envelope_with_timeout(send, bytes, Duration::from_millis(SEND_STALL_TIMEOUT_MS)).await
+async fn send_envelope_guarded(
+    send: &mut SendStream,
+    terminal: &mut bool,
+    bytes: &[u8],
+    timeout: Duration,
+) -> Result<(), TransportError> {
+    ensure_stream_side_open(*terminal)?;
+    write_envelope_with_timeout(send, terminal, bytes, timeout).await
+}
+
+async fn write_envelope(
+    send: &mut SendStream,
+    terminal: &mut bool,
+    bytes: &[u8],
+) -> Result<(), TransportError> {
+    send_envelope_guarded(
+        send,
+        terminal,
+        bytes,
+        Duration::from_millis(SEND_STALL_TIMEOUT_MS),
+    )
+    .await
 }
 
 async fn read_envelope_with_timeout(
@@ -340,17 +466,32 @@ async fn read_envelope(recv: &mut RecvStream) -> Result<Vec<u8>, TransportError>
     read_envelope_with_timeout(recv, Duration::from_millis(RECEIVE_ENVELOPE_TIMEOUT_MS)).await
 }
 
+async fn recv_envelope_guarded(
+    recv: &mut RecvStream,
+    terminal: &mut bool,
+) -> Result<Vec<u8>, TransportError> {
+    ensure_stream_side_open(*terminal)?;
+    let mut guard = StreamSideGuard::new(recv, terminal, |stream: &mut RecvStream| {
+        let _ = stream.stop(VarInt::from_u32(0));
+    });
+    let result = read_envelope(guard.stream_mut()).await;
+    if result.is_ok() {
+        guard.complete();
+    }
+    result
+}
+
 impl Transport for QuicTransport {
     fn transport_profile(&self) -> TransportProfileV1 {
         TransportProfileV1::current(TransportKind::Quic)
     }
 
     async fn send_envelope(&mut self, bytes: &[u8]) -> Result<(), TransportError> {
-        write_envelope(&mut self.send, bytes).await
+        write_envelope(&mut self.send, &mut self.send_terminal, bytes).await
     }
 
     async fn recv_envelope(&mut self) -> Result<Vec<u8>, TransportError> {
-        read_envelope(&mut self.recv).await
+        recv_envelope_guarded(&mut self.recv, &mut self.recv_terminal).await
     }
 }
 
@@ -360,11 +501,13 @@ impl Transport for QuicTransport {
 pub struct QuicSendHalf {
     conn: Connection,
     send: SendStream,
+    terminal: bool,
 }
 
 impl QuicSendHalf {
     /// Gracefully finish the sending side of the stream.
     pub fn finish(&mut self) -> Result<(), TransportError> {
+        self.terminal = true;
         self.send
             .finish()
             .map_err(|e| TransportError::from(QuicError::Io(e.to_string())))
@@ -378,24 +521,78 @@ impl QuicSendHalf {
 
 impl SendEnvelope for QuicSendHalf {
     async fn send_envelope(&mut self, bytes: &[u8]) -> Result<(), TransportError> {
-        write_envelope(&mut self.send, bytes).await
+        write_envelope(&mut self.send, &mut self.terminal, bytes).await
     }
 }
 
 /// Receive-only half of a split [`QuicTransport`].
 pub struct QuicRecvHalf {
     recv: RecvStream,
+    terminal: bool,
 }
 
 impl RecvEnvelope for QuicRecvHalf {
     async fn recv_envelope(&mut self) -> Result<Vec<u8>, TransportError> {
-        read_envelope(&mut self.recv).await
+        recv_envelope_guarded(&mut self.recv, &mut self.terminal).await
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn oversized_envelope_is_rejected_before_stream_guard_creation() {
+        let len = MAX_ENVELOPE_BYTES.saturating_add(1);
+        assert!(len > MAX_ENVELOPE_BYTES);
+        assert!(ensure_stream_side_open(false).is_ok());
+    }
+
+    #[test]
+    fn terminal_stream_side_rejects_every_subsequent_operation() {
+        assert!(ensure_stream_side_open(false).is_ok());
+        assert!(matches!(
+            ensure_stream_side_open(true),
+            Err(TransportError::UnexpectedEof)
+        ));
+    }
+
+    #[derive(Default)]
+    struct FakeStream {
+        terminated: bool,
+        operations: usize,
+    }
+
+    fn terminate_fake_stream(stream: &mut FakeStream) {
+        stream.terminated = true;
+    }
+
+    #[test]
+    fn dropping_incomplete_stream_guard_runs_cleanup_and_sets_terminal() {
+        let mut stream = FakeStream::default();
+        let mut terminal = false;
+        {
+            let mut guard = StreamSideGuard::new(&mut stream, &mut terminal, terminate_fake_stream);
+            guard.stream_mut().operations += 1;
+        }
+        assert!(stream.terminated);
+        assert!(terminal);
+        assert_eq!(stream.operations, 1);
+    }
+
+    #[test]
+    fn completing_stream_guard_preserves_open_direction() {
+        let mut stream = FakeStream::default();
+        let mut terminal = false;
+        {
+            let mut guard = StreamSideGuard::new(&mut stream, &mut terminal, terminate_fake_stream);
+            guard.stream_mut().operations += 1;
+            guard.complete();
+        }
+        assert!(!stream.terminated);
+        assert!(!terminal);
+        assert_eq!(stream.operations, 1);
+    }
 
     #[test]
     fn wire_constants_are_stable() {
