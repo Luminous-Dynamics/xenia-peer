@@ -1344,9 +1344,11 @@ mod tests {
             let dispatch_admitted = dispatch
                 .join()
                 .unwrap_or_else(|_| panic!("model dispatch thread panicked"));
-            finish.join()
+            finish
+                .join()
                 .unwrap_or_else(|_| panic!("model finish thread panicked"));
-            revoke.join()
+            revoke
+                .join()
                 .unwrap_or_else(|_| panic!("model revoke thread panicked"));
 
             let state = state
