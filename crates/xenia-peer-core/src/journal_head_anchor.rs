@@ -554,4 +554,91 @@ mod tests {
         drop(journal);
         remove_journal(&path);
     }
+    #[test]
+    fn witness_cas_has_one_winner_for_racing_generations() {
+        use std::sync::Barrier;
+        use std::thread;
+
+        let witness = MemoryJournalHeadWitness::default();
+        let session = [8; 32];
+        let genesis = JournalHeadCheckpoint {
+            generation: 1,
+            head: DurableOperationJournalHead {
+                session_fingerprint: session,
+                clock_domain: 24,
+                journal_sequence: 0,
+                wal_chain_digest: [0; 32],
+                last_operation_sequence: None,
+            },
+        };
+        witness
+            .compare_and_swap(session, None, genesis)
+            .unwrap_or_else(|error| panic!("genesis CAS failed: {error:?}"));
+        let barrier = Arc::new(Barrier::new(3));
+        let mut handles = Vec::new();
+        for id in [1_u8, 2_u8] {
+            let witness = witness.clone();
+            let barrier = Arc::clone(&barrier);
+            handles.push(thread::spawn(move || {
+                let next = JournalHeadCheckpoint {
+                    generation: 2,
+                    head: DurableOperationJournalHead {
+                        session_fingerprint: session,
+                        clock_domain: 24,
+                        journal_sequence: 1,
+                        wal_chain_digest: [id; 32],
+                        last_operation_sequence: Some(u64::from(id)),
+                    },
+                };
+                barrier.wait();
+                witness.compare_and_swap(session, Some(1), next)
+            }));
+        }
+        barrier.wait();
+        let results: Vec<_> = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap_or_else(|_| panic!("CAS thread panicked")))
+            .collect();
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| **result == Err(JournalHeadWitnessError::CompareAndSwapConflict))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn unavailable_witness_fails_closed() {
+        struct Unavailable;
+        impl JournalHeadWitness for Unavailable {
+            fn load(
+                &self,
+                _session_fingerprint: [u8; 32],
+            ) -> Result<Option<JournalHeadCheckpoint>, JournalHeadWitnessError> {
+                Err(JournalHeadWitnessError::Unavailable)
+            }
+
+            fn compare_and_swap(
+                &self,
+                _session_fingerprint: [u8; 32],
+                _expected_generation: Option<u64>,
+                _next: JournalHeadCheckpoint,
+            ) -> Result<JournalHeadCheckpoint, JournalHeadWitnessError> {
+                Err(JournalHeadWitnessError::Unavailable)
+            }
+        }
+
+        let path = test_path();
+        let journal = DurableOperationEvidenceJournal::open(&path, [9; 32], 25)
+            .unwrap_or_else(|error| panic!("open failed: {error:?}"));
+        assert!(matches!(
+            verify_journal_head(&journal, &Unavailable),
+            Err(JournalHeadAnchorError::Witness(JournalHeadWitnessError::Unavailable))
+        ));
+        drop(journal);
+        remove_journal(&path);
+    }
+
 }
