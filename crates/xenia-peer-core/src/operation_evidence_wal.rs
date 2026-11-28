@@ -24,8 +24,8 @@ use serde::{Deserialize, Serialize};
 use crate::m1_session::M1Permission;
 use crate::operation_evidence::{
     AdmissionResult, OperationContext, OperationDirection, OperationEvidenceError,
-    OperationEvidenceEvent, OperationEvidenceLedger, OperationId, OperationSnapshot,
-    OperationState, ReconciliationOutcome,
+    OperationEvidenceEvent, OperationEvidenceLedger, OperationEvidenceStateCounts, OperationId,
+    OperationSnapshot, OperationState, ReconciliationOutcome,
 };
 
 /// Durable WAL schema version. A future incompatible record layout must bump it.
@@ -811,6 +811,11 @@ impl DurableOperationEvidenceJournal {
     /// Read the in-memory view of the fully replayed operation event chain.
     pub fn events(&self) -> &[OperationEvidenceEvent] {
         self.ledger.events()
+    }
+
+    /// Return payload-free counts from the fully replayed operation records.
+    pub fn state_counts(&self) -> OperationEvidenceStateCounts {
+        self.ledger.state_counts()
     }
 
     /// Hash-chain root for the operation stage ledger.
