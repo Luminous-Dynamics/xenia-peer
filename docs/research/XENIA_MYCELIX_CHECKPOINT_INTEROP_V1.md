@@ -6,6 +6,7 @@ This branch defines a versioned Xenia-to-Mycelix checkpoint payload and a shared
 
 Implemented:
 
+- Checkpoint construction fails closed if the WAL writer is poisoned or the semantic operation-stage chain fails verification.
 - Payload-redacted Xenia checkpoint structure.
 - Keyed, deployment-scoped journal identity commitment.
 - Fixed canonical binary encoding with explicit field order and integer endianness.
