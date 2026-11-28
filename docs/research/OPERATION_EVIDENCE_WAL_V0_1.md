@@ -91,6 +91,14 @@ The public `head_candidate()` accessor exports the payload-free tuple `(session_
 
 PR #542 currently has in-memory input/clipboard outcomes. This WAL is the next substrate; live integration must separately bind stable ingress operation IDs and owner receipts. PR #531 remains the underlying stage ledger; PR #532 remains a local effect-commit/revocation gate reference model.
 
+## 8. Independent rollback witness (reference model in PR #552)
+
+The WAL retains a bounded verified prefix-head index, including genesis, so a separate witness can check that its stored tuple is an exact prefix of the recovered file. See the journal-head anchor module's verification API and the WAL's prefix verification method.
+
+A missing witness checkpoint is auto-initialized only for an empty journal. A non-empty unanchored journal requires explicit bootstrap. A recovered journal older than the checkpoint is rejected; a different digest or operation-sequence value at the same prefix is rejected. A newer local suffix is deliberately reported as unanchored: it is not automatically promoted because a malicious local writer could otherwise rewrite a self-consistent suffix and have startup bless it. The caller must independently verify the stage/owner receipts, then request a generation-checked witness advance.
+
+The JournalHeadWitness trait is an interface only. The test-only memory witness is not rollback-resistant storage. Production requires an authenticated, durable, atomic CAS backend in a separate security/failure domain. The local WAL and its BLAKE3 digest do not by themselves prove the truth of external effects.
+
 ## 7. Proposed performance targets (not measured)
 
 - p99 WAL `sync_data` barrier <=3 ms on a qualified local SSD profile.
