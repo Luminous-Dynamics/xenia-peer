@@ -1,0 +1,84 @@
+{
+  "schema": "xenia-journal-head-anchor-benchmark-v0.1",
+  "status": "preregistered_unmeasured",
+  "base_wal_pr": 547,
+  "witness_model_pr": 552,
+  "implementation": {
+    "module": "crates/xenia-peer-core/src/journal_head_anchor.rs",
+    "prefix_index": "bounded WAL prefix-head vector including genesis",
+    "production_witness_backend": false,
+    "signed_receipt_verification": false,
+    "live_effect_integration": false
+  },
+  "invariants": {
+    "empty_genesis_only_auto_initialization": true,
+    "nonempty_unanchored_wal_rejected": true,
+    "local_sequence_below_witness_rejected": true,
+    "anchored_prefix_hash_must_match_exactly": true,
+    "anchored_prefix_operation_sequence_must_match": true,
+    "newer_local_suffix_not_auto_promoted": true,
+    "checkpoint_advance_requires_external_receipt_verification": true,
+    "witness_generation_cas_is_monotonic": true,
+    "witness_unavailable_fails_closed": true,
+    "same_sequence_fork_rejected": true,
+    "session_and_clock_domain_are_bound": true
+  },
+  "scenarios": [
+    {"id":"JHA-001","name":"empty-journal-genesis-bootstrap","expected":"InitializedEmptyJournal"},
+    {"id":"JHA-002","name":"nonempty-journal-without-checkpoint","expected":"FailClosed"},
+    {"id":"JHA-003","name":"exact-current-head","expected":"AlreadyAnchored"},
+    {"id":"JHA-004","name":"valid-newer-suffix-before-external-verification","expected":"UnanchoredSuffix"},
+    {"id":"JHA-005","name":"explicit-verified-suffix-advance","expected":"GenerationIncremented"},
+    {"id":"JHA-006","name":"truncate-to-older-valid-prefix","expected":"RollbackDetected"},
+    {"id":"JHA-007","name":"same-sequence-different-wal-digest","expected":"PrefixMismatch"},
+    {"id":"JHA-008","name":"same-sequence-different-operation-high-water","expected":"PrefixMismatch"},
+    {"id":"JHA-009","name":"session-fingerprint-mismatch","expected":"FailClosed"},
+    {"id":"JHA-010","name":"clock-domain-mismatch","expected":"FailClosed"},
+    {"id":"JHA-011","name":"stale-witness-generation-cas","expected":"CompareAndSwapConflict"},
+    {"id":"JHA-012","name":"two-writers-advance-same-generation","expected":"ExactlyOneCasWinner"},
+    {"id":"JHA-013","name":"witness-unavailable-at-startup","expected":"FailClosedNoNewEffect"},
+    {"id":"JHA-014","name":"crash-after-wal-sync-before-witness-cas","expected":"UnanchoredSuffixNoNewEffect"},
+    {"id":"JHA-015","name":"witness-restore-to-older-generation","expected":"WitnessRollbackDetectedByIndependentWitnessPolicy"},
+    {"id":"JHA-016","name":"restore-prefix-index-after-process-restart","expected":"ExactPrefixStillVerifiable"},
+    {"id":"JHA-017","name":"tampered-unanchored-terminal-suffix","expected":"NoAutoPromotionOwnerReceiptRequired"},
+    {"id":"JHA-018","name":"10-million-wal-event-history-over-lifetime","expected":"HardWALBoundFailClosedAtExistingLimit"}
+  ],
+  "benchmarks": {
+    "journal_event_bound": 32768,
+    "prefix_index_entries_max": 32769,
+    "concurrency_levels": [1, 8, 32, 128],
+    "operation_counts": [1000, 10000, 100000],
+    "comparison_modes": [
+      "local_wal_without_external_witness",
+      "naive_same_disk_checkpoint_negative_control",
+      "prefix_index_plus_memory_witness_test_double",
+      "prefix_index_plus_production_remote_witness"
+    ],
+    "metrics": [
+      "prefix_verification_p50_p95_p99_p999_us",
+      "witness_cas_p50_p95_p99_p999_ms",
+      "cas_conflict_rate",
+      "witness_unavailability_rate",
+      "memory_bytes_per_prefix_index_entry",
+      "recovery_time_after_process_restart_ms",
+      "end_to_end_effect_admission_time_ms"
+    ]
+  },
+  "provisional_targets_not_results": {
+    "local_prefix_verification_p99_us": 50,
+    "rolled_back_wal_heads_accepted": 0,
+    "forked_wal_prefixes_accepted": 0,
+    "unanchored_suffixes_auto_promoted": 0,
+    "new_effects_dispatched_when_witness_unavailable": 0,
+    "stale_generation_cas_winners": 0
+  },
+  "measurement_requirements": {
+    "record_cpu_os_kernel_filesystem_and_rust_toolchain": true,
+    "record_witness_backend_and_durability_contract": true,
+    "record_network_region_and_round_trip_latency": true,
+    "record_generation_and_conflict_history": true,
+    "record_all_raw_samples": true,
+    "separate_local_prefix_cost_from_remote_witness_cost": true,
+    "record_exact_commit_sha_and_workflow_receipts": true
+  }
+}
