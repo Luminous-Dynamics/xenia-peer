@@ -267,6 +267,7 @@ pub fn advance_checkpoint_after_external_verification<W: JournalHeadWitness>(
     Ok(JournalHeadAdvanceReceipt { previous, current })
 }
 
+/// Test-only in-memory witness for exercising journal-head CAS transitions.
 #[cfg(test)]
 #[derive(Clone, Default)]
 pub struct MemoryJournalHeadWitness {
