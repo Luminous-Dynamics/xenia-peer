@@ -113,6 +113,29 @@ Provisional performance targets are not results: p50 gate transition <= 5 us, p9
 
 Report synthetic state-machine results separately from live carrier and crash/restart results. Never compare an in-memory model's latency against a broker's durable publisher-confirm latency as though they were equivalent workloads.
 
+
+## Crash recovery: unattempted is not UNKNOWN
+
+A recovered operation can be in two materially different states:
+
+- Admitted, not Attempted: the WAL proves the dispatch protocol never crossed its durable attempt barrier. This operation may be resumed only with the exact same operation ID, sequence, session, lane, direction and context, and only after the caller revalidates the exact current authority epoch. A stale-epoch admission is rejected and must be terminalized by the WAL owner; it is never replayed under a new ID.
+- Attempted, no durable owner result: this is UNKNOWN. It blocks new mutations until independent reconciliation establishes the outcome. A timeout, task cancellation or restart does not turn it into a known non-dispatch.
+
+The gate recovery projection now carries both classes. RecoveredUnattemptedDispatch restores an idempotent re-admission slot for the original operation identity. It does not allocate a new sequence. Revocation discards recovered-but-not-started admissions, while UNKNOWN continues to dominate and block all new mutations. The projection must come from a complete, verified WAL replay; omitting an admitted operation can still leave its durable sequence consumed and orphaned.
+
+The required WAL/transport order is:
+
+1. Persist AuthorizationAdmitted.
+2. Prepare the one-shot dispatch permit.
+3. Persist EffectAttempted and sync it.
+4. Call begin_dispatch immediately before invoking the transport future.
+5. Await without holding the gate mutex.
+6. Persist the transport-owner result; if ambiguous, persist UNKNOWN or recover it as UNKNOWN.
+
+This order deliberately prefers a conservative false-positive UNKNOWN if a crash occurs after the durable attempt marker but before the transport future is invoked. It never prefers a duplicate external effect. If revocation wins between the attempt marker and begin_dispatch, no send occurs; the caller must persist a definitive not-committed result from the dispatch gate rejection path.
+
+The extended conformance cases are AED-024 through AED-028 in the benchmark manifest. They are preregistered, not measurements.
+
 ## Next integration gates
 
 1. Add a durable operation-event writer with admission/attempt fsync before transport dispatch.
