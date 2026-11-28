@@ -2,7 +2,7 @@
   "schema": "xenia-async-effect-dispatch-benchmark-v0.1",
   "status": "preregistered_unmeasured",
   "issue": 545,
-  "purpose": "Qualify non-blocking dispatch admission, revoke ordering, cancellation-to-UNKNOWN behavior, reconciliation, and bounded overhead. No benchmark result is claimed by this artifact.",
+  "purpose": "Qualify non-blocking dispatch admission, revoke ordering, cancellation-to-UNKNOWN behavior, reconciliation, and bounded overhead. No benchmark result is claimed by this artifact. Adds explicit restart semantics for durable admissions that never reached the effect owner: resume only the exact same identity under the same freshly authenticated authority epoch, while retaining the UNKNOWN barrier for all attempted-but-unresolved operations.",
   "implementation": {
     "module": "crates/xenia-peer-core/src/async_effect_dispatch.rs",
     "model_only": true,
@@ -34,7 +34,10 @@
     "operation_sequence_high_water_restored_before_resume": true,
     "outstanding_capacity_bounded_independent_of_lifetime_operations": true,
     "restart_rebuilds_unresolved_unknown_operations": true,
-    "sequence_high_water_restored_before_resume": true
+    "sequence_high_water_restored_before_resume": true,
+    "recovered_unattempted_operations_resume_only_with_same_identity": true,
+    "stale_authority_unattempted_operations_never_resume": true,
+    "recovered_unattempted_and_unknown_are_distinct": true
   },
   "scenarios": [
     {
@@ -233,6 +236,54 @@
         "operation_identity_mismatch_rejected",
         "sequence_above_high_water_rejected",
         "duplicate_unknown_ids_rejected"
+      ]
+    },
+    {
+      "id": "AED-024",
+      "name": "crash-after-durable-admission-before-attempt",
+      "expected": "SameIdentityMayResumeAfterFreshAuthorityCheck",
+      "assert": [
+        "no_effect_was_invoked_before_attempt_record",
+        "same_operation_id_and_sequence_required",
+        "no_new_sequence_allocated"
+      ]
+    },
+    {
+      "id": "AED-025",
+      "name": "restart-with-admitted-but-not-attempted-operation",
+      "expected": "RecoveredUnattempted",
+      "assert": [
+        "operation_reconstructed_from_complete_wal_projection",
+        "same_identity_reprepared",
+        "stale_authority_rejected"
+      ]
+    },
+    {
+      "id": "AED-026",
+      "name": "revoke-with-recovered-unattempted-operation",
+      "expected": "RecoveredAdmissionCancelled",
+      "assert": [
+        "no_dispatch_after_revoke",
+        "cancelled_before_dispatch_count_incremented",
+        "no_unknown_state_created"
+      ]
+    },
+    {
+      "id": "AED-027",
+      "name": "unattempted-and-unknown-recovery-mixed",
+      "expected": "UnknownBarrierDominates",
+      "assert": [
+        "unattempted_operation_does_not_bypass_unknown",
+        "no_mutation_admitted_until_unknown_reconciled"
+      ]
+    },
+    {
+      "id": "AED-028",
+      "name": "duplicate-id-in-recovery-projections",
+      "expected": "InvalidRecoveryState",
+      "assert": [
+        "cross_projection_duplicate_rejected",
+        "gate_does_not_start"
       ]
     }
   ],
