@@ -248,7 +248,9 @@ impl OperationEvidenceStateCounts {
     /// Committed is not counted as pending local mutation; it can still await
     /// a stronger observer, which is represented separately by committed.
     pub fn pending_effects(self) -> u64 {
-        self.admitted.saturating_add(self.attempted).saturating_add(self.unknown)
+        self.admitted
+            .saturating_add(self.attempted)
+            .saturating_add(self.unknown)
     }
 
     /// Locally committed operations that still lack the stronger observation
@@ -628,11 +630,20 @@ impl OperationEvidenceLedger {
                 OperationState::Committed => counts.committed = counts.committed.saturating_add(1),
                 OperationState::Observed => counts.observed = counts.observed.saturating_add(1),
                 OperationState::Rejected => counts.rejected = counts.rejected.saturating_add(1),
-                OperationState::NotCommitted => counts.not_committed = counts.not_committed.saturating_add(1),
+                OperationState::NotCommitted => {
+                    counts.not_committed = counts.not_committed.saturating_add(1)
+                }
                 OperationState::Unknown => counts.unknown = counts.unknown.saturating_add(1),
-                OperationState::ReconciledNotCommitted => counts.reconciled_not_committed = counts.reconciled_not_committed.saturating_add(1),
-                OperationState::ReconciledCommitted => counts.reconciled_committed = counts.reconciled_committed.saturating_add(1),
-                OperationState::ReconciledObserved => counts.reconciled_observed = counts.reconciled_observed.saturating_add(1),
+                OperationState::ReconciledNotCommitted => {
+                    counts.reconciled_not_committed =
+                        counts.reconciled_not_committed.saturating_add(1)
+                }
+                OperationState::ReconciledCommitted => {
+                    counts.reconciled_committed = counts.reconciled_committed.saturating_add(1)
+                }
+                OperationState::ReconciledObserved => {
+                    counts.reconciled_observed = counts.reconciled_observed.saturating_add(1)
+                }
             }
         }
         counts
